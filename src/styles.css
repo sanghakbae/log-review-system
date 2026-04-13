@@ -1297,12 +1297,12 @@ button {
 
 .result-log-head,
 .result-log-row {
-  grid-template-columns: minmax(150px, 1.05fr) minmax(210px, 1.35fr) minmax(150px, 0.9fr) minmax(150px, 0.9fr) minmax(280px, 1.8fr);
+  grid-template-columns: minmax(140px, 0.95fr) minmax(140px, 0.95fr) minmax(130px, 0.8fr) minmax(160px, 1fr) minmax(150px, 0.9fr) minmax(260px, 1.7fr);
 }
 
 .dense-table .result-log-head,
 .dense-table .result-log-row {
-  grid-template-columns: minmax(150px, 1.05fr) minmax(210px, 1.35fr) minmax(150px, 0.9fr) minmax(150px, 0.9fr) minmax(280px, 1.8fr);
+  grid-template-columns: minmax(140px, 0.95fr) minmax(140px, 0.95fr) minmax(130px, 0.8fr) minmax(160px, 1fr) minmax(150px, 0.9fr) minmax(260px, 1.7fr);
 }
 
 .result-log-row > span {

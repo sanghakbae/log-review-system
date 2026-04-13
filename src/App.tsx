@@ -14,6 +14,7 @@ type ReviewRequest = {
   request_body?: string;
   file_summaries?: ReviewFileSummary[];
   status: 'submitted' | 'in_review' | 'done';
+  request_created_at?: string;
   created_at: string;
 };
 
@@ -28,8 +29,10 @@ type ReviewFileSummary = {
 
 type ReviewResultEntry = {
   id: string;
-  requestTitle: string;
+  requestId: string;
   requestName: string;
+  serviceName: string;
+  requestCreatedAt: string;
   reviewerName: string;
   completedAt: string;
   resultText: string;
@@ -335,6 +338,7 @@ const readRequestBackup = (userId: string) => {
         typeof (item as ReviewRequest).id === 'string' &&
         typeof (item as ReviewRequest).title === 'string' &&
         typeof (item as ReviewRequest).requester_name === 'string' &&
+        typeof (item as ReviewRequest).request_created_at === 'string' &&
         typeof (item as ReviewRequest).created_at === 'string'
       );
     });
@@ -365,18 +369,19 @@ const readReviewResultsBackup = (userId: string) => {
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter((item): item is ReviewResultEntry => {
-      return (
-        Boolean(item) &&
-        typeof item === 'object' &&
-        typeof (item as ReviewResultEntry).id === 'string' &&
-        typeof (item as ReviewResultEntry).requestTitle === 'string' &&
-        typeof (item as ReviewResultEntry).requestName === 'string' &&
-        typeof (item as ReviewResultEntry).reviewerName === 'string' &&
-        typeof (item as ReviewResultEntry).completedAt === 'string' &&
-        typeof (item as ReviewResultEntry).resultText === 'string'
-      );
-    });
+    return parsed
+      .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
+      .map((item) => ({
+        id: typeof item.id === 'string' ? item.id : `review-${Date.now()}`,
+        requestId: typeof item.requestId === 'string' ? item.requestId : '',
+        requestName: typeof item.requestName === 'string' ? item.requestName : '미지정',
+        serviceName: typeof item.serviceName === 'string' ? item.serviceName : '',
+        requestCreatedAt: typeof item.requestCreatedAt === 'string' ? item.requestCreatedAt : '',
+        reviewerName: typeof item.reviewerName === 'string' ? item.reviewerName : '미지정',
+        completedAt: typeof item.completedAt === 'string' ? item.completedAt : '',
+        resultText: typeof item.resultText === 'string' ? item.resultText : '',
+      }))
+      .filter((item) => item.completedAt && item.resultText);
   } catch {
     return [];
   }
@@ -772,6 +777,7 @@ function App() {
 
       const dbRequests = (data ?? []).map((item) => ({
           ...item,
+          request_created_at: item.created_at,
           service_name: parseStoredRequestBody(item.request_body)?.serviceName ?? '',
           log_file_count:
             attachmentCounts.get(item.id) ?? parseStoredRequestBody(item.request_body)?.logFiles?.length ?? 0,
@@ -872,7 +878,7 @@ function App() {
       const { data, error } = await supabase
         .from('lr_review_results')
         .select(
-          'id, request_id, reviewer_id, summary, created_at, request:lr_review_requests(title, requester_name)',
+          'id, request_id, reviewer_id, summary, created_at, request:lr_review_requests(created_at, service_name, requester_name)',
         )
         .order('created_at', { ascending: false });
 
@@ -890,22 +896,38 @@ function App() {
 
         return {
           id: row.id,
-          requestTitle: requestRow?.title ?? '미지정',
+          requestId: row.request_id ?? '',
           requestName: requestRow?.requester_name ?? '미지정',
+          serviceName: requestRow?.service_name ?? '',
+          requestCreatedAt: requestRow?.created_at ? new Date(requestRow.created_at).toLocaleDateString('ko-KR') : '',
           reviewerName,
           completedAt: new Date(row.created_at).toLocaleString('ko-KR'),
           resultText: row.summary ?? '',
         };
       });
 
+      const enrichResult = (result: ReviewResultEntry) => {
+        const request = requests.find((item) => item.id === result.requestId);
+        return {
+          ...result,
+          requestName: result.requestName || request?.requester_name || '미지정',
+          serviceName: result.serviceName || request?.service_name || '',
+          requestCreatedAt:
+            result.requestCreatedAt ||
+            (request?.request_created_at ? new Date(request.request_created_at).toLocaleString('ko-KR') : ''),
+        };
+      };
+
       setReviewResults([
-        ...dbResults,
-        ...backupResults.filter((backup) => !dbResults.some((item) => item.id === backup.id)),
+        ...dbResults.map(enrichResult),
+        ...backupResults
+          .filter((backup) => !dbResults.some((item) => item.id === backup.id))
+          .map(enrichResult),
       ]);
     };
 
     void loadReviewResults();
-  }, [members, sessionUser]);
+  }, [members, requests, sessionUser]);
 
   const stats = useMemo(
     () => ({
@@ -1010,6 +1032,7 @@ function App() {
         requester_name: requesterName,
         request_body: requestBody,
         status: 'submitted' as const,
+        request_created_at: new Date().toISOString(),
       };
 
       const { error: requestError } = await supabase.from('lr_review_requests').insert(requestRow);
@@ -1064,6 +1087,7 @@ function App() {
         request_body: requestBody,
         file_summaries: fileSummaries,
         status: 'submitted',
+        request_created_at: requestRow.request_created_at,
         created_at: new Date().toISOString(),
       };
 
@@ -1083,6 +1107,7 @@ function App() {
       request_body: requestBody,
       file_summaries: fileSummaries,
       status: 'submitted',
+      request_created_at: new Date().toISOString(),
       created_at: new Date().toISOString(),
     };
 
@@ -1162,8 +1187,12 @@ function App() {
     const resultId = `review-${Date.now()}`;
     const resultEntry = {
       id: resultId,
-      requestTitle: selectedRequest.title,
+      requestId: selectedRequest.id,
       requestName: selectedRequest.requester_name,
+      serviceName: selectedRequest.service_name || '',
+      requestCreatedAt: selectedRequest.request_created_at
+        ? new Date(selectedRequest.request_created_at).toLocaleString('ko-KR')
+        : new Date(selectedRequest.created_at).toLocaleString('ko-KR'),
       reviewerName: sessionUser?.name ?? '미지정',
       completedAt,
       resultText: trimmed,
@@ -2044,8 +2073,9 @@ function ResultLogView({ results }: { results: ReviewResultEntry[] }) {
         <div className="table-card dense-table">
           <div className="table">
             <div className="table-row table-head result-log-head">
-              <span className="text-14">timestamp</span>
-              <span className="text-14">요청 제목</span>
+              <span className="text-14">검토 요청일</span>
+              <span className="text-14">검토 완료일</span>
+              <span className="text-14">서비스</span>
               <span className="text-14">요청자</span>
               <span className="text-14">검토자</span>
               <span className="text-14">검토 결과</span>
@@ -2055,8 +2085,9 @@ function ResultLogView({ results }: { results: ReviewResultEntry[] }) {
             ) : (
               results.map((result) => (
                 <div className="table-row result-log-row" key={result.id}>
+                  <span className="text-12">{result.requestCreatedAt || '-'}</span>
                   <span className="text-12">{result.completedAt}</span>
-                  <span className="text-12">{result.requestTitle}</span>
+                  <span className="text-12">{result.serviceName || '-'}</span>
                   <span className="text-12">{result.requestName}</span>
                   <span className="text-12">{result.reviewerName}</span>
                   <span className="text-12 result-log-summary">{result.resultText}</span>
