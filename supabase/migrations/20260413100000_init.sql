@@ -9,6 +9,12 @@ create table if not exists public.lr_profiles (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists public.lr_service_names (
+  id uuid primary key default gen_random_uuid(),
+  name text not null unique,
+  created_at timestamptz not null default now()
+);
+
 create table if not exists public.lr_review_requests (
   id uuid primary key default gen_random_uuid(),
   title text not null,
@@ -51,6 +57,7 @@ create table if not exists public.lr_review_logs (
 );
 
 alter table public.lr_profiles enable row level security;
+alter table public.lr_service_names enable row level security;
 alter table public.lr_review_requests enable row level security;
 alter table public.lr_review_attachments enable row level security;
 alter table public.lr_review_results enable row level security;
@@ -69,6 +76,33 @@ to authenticated
 using (
   auth.uid() = id
   or exists (
+    select 1
+    from public.lr_profiles p
+    where p.id = auth.uid()
+      and p.role = 'admin'
+  )
+);
+
+create policy "Service names readable by authenticated users"
+on public.lr_service_names
+for select
+to authenticated
+using (auth.role() = 'authenticated');
+
+create policy "Service names manageable by admin"
+on public.lr_service_names
+for all
+to authenticated
+using (
+  exists (
+    select 1
+    from public.lr_profiles p
+    where p.id = auth.uid()
+      and p.role = 'admin'
+  )
+)
+with check (
+  exists (
     select 1
     from public.lr_profiles p
     where p.id = auth.uid()

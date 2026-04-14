@@ -98,7 +98,7 @@ const roleLabel: Record<UserRole, string> = {
 };
 
 const accessByRole: Record<UserRole, ViewId[]> = {
-  requester: ['dashboard', 'review-write'],
+  requester: ['dashboard', 'review-write', 'permissions'],
   reviewer: ['dashboard', 'review-write', 'review-result', 'result-log', 'permissions'],
   admin: ['dashboard', 'review-write', 'review-result', 'result-log', 'permissions'],
 };
@@ -278,228 +278,11 @@ const normalizePromptIndex = (value: unknown) => {
   return value;
 };
 
-const getPromptStorageKey = (userId: string) => `log-review-system:review-prompts:${userId}`;
-const getRequestStorageKey = (userId: string) => `log-review-system:review-requests:${userId}`;
-const getResultStorageKey = (userId: string) => `log-review-system:review-results:${userId}`;
-const getGuideStorageKey = (userId: string) => `log-review-system:review-guide:${userId}`;
-const getUnitNameStorageKey = (userId: string) => `log-review-system:unit-name:${userId}`;
-const getServiceNamesStorageKey = (userId: string) => `log-review-system:service-names:${userId}`;
 const getOAuthRedirectUrl = () => `${window.location.origin}${window.location.pathname}`;
 
-const readPromptBackup = (userId: string) => {
-  if (typeof window === 'undefined') {
-    return null;
-  }
-
-  try {
-    const raw = window.localStorage.getItem(getPromptStorageKey(userId));
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as { slots?: unknown; selectedSlot?: unknown };
-    return {
-      slots: normalizePromptSlots(parsed.slots),
-      selectedSlot: normalizePromptIndex(parsed.selectedSlot),
-    };
-  } catch {
-    return null;
-  }
-};
-
-const writePromptBackup = (userId: string, slots: string[], selectedSlot: number) => {
-  if (typeof window === 'undefined') {
-    return;
-  }
-
-  try {
-    window.localStorage.setItem(
-      getPromptStorageKey(userId),
-      JSON.stringify({
-        slots,
-        selectedSlot,
-      }),
-    );
-  } catch {
-    // Ignore storage failures and keep the DB save path as the primary source.
-  }
-};
-
-const readRequestBackup = (userId: string) => {
-  if (typeof window === 'undefined') {
-    return [];
-  }
-
-  try {
-    const raw = window.localStorage.getItem(getRequestStorageKey(userId));
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((item): item is ReviewRequest => {
-      return (
-        Boolean(item) &&
-        typeof item === 'object' &&
-        typeof (item as ReviewRequest).id === 'string' &&
-        typeof (item as ReviewRequest).title === 'string' &&
-        typeof (item as ReviewRequest).requester_name === 'string' &&
-        typeof (item as ReviewRequest).request_created_at === 'string' &&
-        typeof (item as ReviewRequest).created_at === 'string'
-      );
-    });
-  } catch {
-    return [];
-  }
-};
-
-const writeRequestBackup = (userId: string, requests: ReviewRequest[]) => {
-  if (typeof window === 'undefined') {
-    return;
-  }
-
-  try {
-    window.localStorage.setItem(getRequestStorageKey(userId), JSON.stringify(requests));
-  } catch {
-    // Ignore local backup failures.
-  }
-};
-
-const readReviewResultsBackup = (userId: string) => {
-  if (typeof window === 'undefined') {
-    return [];
-  }
-
-  try {
-    const raw = window.localStorage.getItem(getResultStorageKey(userId));
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
-      .map((item) => ({
-        id: typeof item.id === 'string' ? item.id : `review-${Date.now()}`,
-        requestId: typeof item.requestId === 'string' ? item.requestId : '',
-        requestName: typeof item.requestName === 'string' ? item.requestName : '미지정',
-        serviceName: typeof item.serviceName === 'string' ? item.serviceName : '',
-        requestCreatedAt: typeof item.requestCreatedAt === 'string' ? item.requestCreatedAt : '',
-        reviewerName: typeof item.reviewerName === 'string' ? item.reviewerName : '미지정',
-        completedAt: typeof item.completedAt === 'string' ? item.completedAt : '',
-        resultText: typeof item.resultText === 'string' ? item.resultText : '',
-      }))
-      .filter((item) => item.completedAt && item.resultText);
-  } catch {
-    return [];
-  }
-};
-
-const writeReviewResultsBackup = (userId: string, results: ReviewResultEntry[]) => {
-  if (typeof window === 'undefined') {
-    return;
-  }
-
-  try {
-    window.localStorage.setItem(getResultStorageKey(userId), JSON.stringify(results));
-  } catch {
-    // Ignore local backup failures.
-  }
-};
-
-const readReviewGuideBackup = (userId: string) => {
-  if (typeof window === 'undefined') {
-    return null;
-  }
-
-  try {
-    const raw = window.localStorage.getItem(getGuideStorageKey(userId));
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as { selectedRequestId?: unknown; reviewGuideText?: unknown };
-    return {
-      selectedRequestId: typeof parsed.selectedRequestId === 'string' ? parsed.selectedRequestId : null,
-      reviewGuideText: typeof parsed.reviewGuideText === 'string' ? parsed.reviewGuideText : '',
-    };
-  } catch {
-    return null;
-  }
-};
-
-const writeReviewGuideBackup = (userId: string, selectedRequestId: string | null, reviewGuideText: string) => {
-  if (typeof window === 'undefined') {
-    return;
-  }
-
-  try {
-    window.localStorage.setItem(
-      getGuideStorageKey(userId),
-      JSON.stringify({
-        selectedRequestId,
-        reviewGuideText,
-      }),
-    );
-  } catch {
-    // Ignore local backup failures.
-  }
-};
-
-const readUnitNameBackup = (userId: string) => {
-  if (typeof window === 'undefined') {
-    return '';
-  }
-
-  try {
-    const raw = window.localStorage.getItem(getUnitNameStorageKey(userId));
-    return typeof raw === 'string' ? raw : '';
-  } catch {
-    return '';
-  }
-};
-
-const writeUnitNameBackup = (userId: string, unitName: string) => {
-  if (typeof window === 'undefined') {
-    return;
-  }
-
-  try {
-    window.localStorage.setItem(getUnitNameStorageKey(userId), unitName);
-  } catch {
-    // Ignore local backup failures.
-  }
-};
-
-const readServiceNamesBackup = (userId: string) => {
-  if (typeof window === 'undefined') {
-    return [];
-  }
-
-  try {
-    const raw = window.localStorage.getItem(getServiceNamesStorageKey(userId));
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim());
-  } catch {
-    return [];
-  }
-};
-
-const writeServiceNamesBackup = (userId: string, serviceNames: string[]) => {
-  if (typeof window === 'undefined') {
-    return;
-  }
-
-  try {
-    window.localStorage.setItem(getServiceNamesStorageKey(userId), JSON.stringify(serviceNames));
-  } catch {
-    // Ignore storage failures and keep the UI usable.
-  }
-};
-
 function App() {
-  const [activeView, setActiveView] = useState<ViewId>(() => {
-    if (typeof window === 'undefined') return 'dashboard';
-    const storedView = window.localStorage.getItem('active-view') as ViewId | null;
-    const allowedViews: ViewId[] = ['dashboard', 'review-write', 'review-result', 'result-log', 'permissions'];
-    return storedView && allowedViews.includes(storedView) ? storedView : 'dashboard';
-  });
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
-    if (typeof window === 'undefined') return false;
-    return window.localStorage.getItem('sidebar-collapsed') === 'true';
-  });
+  const [activeView, setActiveView] = useState<ViewId>('dashboard');
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sessionUser, setSessionUser] = useState<SessionUser | null>(null);
   const [loadingAuth, setLoadingAuth] = useState(true);
   const [requests, setRequests] = useState<ReviewRequest[]>([]);
@@ -521,16 +304,6 @@ function App() {
   const [authError, setAuthError] = useState<string | null>(null);
   const reviewGuideProgressTimerRef = useRef<number | null>(null);
   const activeReviewPromptText = reviewPromptSlots[selectedReviewPromptIndex] ?? defaultReviewPrompt;
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    window.localStorage.setItem('sidebar-collapsed', String(sidebarCollapsed));
-  }, [sidebarCollapsed]);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    window.localStorage.setItem('active-view', activeView);
-  }, [activeView]);
 
   useEffect(() => {
     if (!isSupabaseConfigured) {
@@ -604,31 +377,19 @@ function App() {
         .select('id, email, full_name, unit_name, role, review_prompt_text, review_prompt_slots, review_prompt_selected_slot');
 
       if (error) {
-        const promptBackup = readPromptBackup(sessionUser.id);
-        const unitNameBackup = readUnitNameBackup(sessionUser.id);
-        setMembers((current) => {
-          const currentUserRole = isAdminAccount(sessionUser.name, sessionUser.email) ? 'admin' : 'requester';
-          const currentUser = {
+        setMembers([
+          {
             id: sessionUser.id,
             name: sessionUser.name,
             email: sessionUser.email,
-            unitName: unitNameBackup,
-            role: currentUserRole as UserRole,
-          };
-          return current.some((member) => member.name === currentUser.name || member.email === currentUser.email)
-            ? current
-            : [...current, currentUser];
-        });
-        setCurrentUserUnitName(unitNameBackup);
-        if (promptBackup) {
-          setReviewPromptSlots(promptBackup.slots);
-          setEditingReviewPromptIndex(promptBackup.selectedSlot);
-          setSelectedReviewPromptIndex(promptBackup.selectedSlot);
-        } else {
-          setReviewPromptSlots(defaultReviewPromptSlots);
-          setEditingReviewPromptIndex(0);
-          setSelectedReviewPromptIndex(0);
-        }
+            unitName: '',
+            role: (isAdminAccount(sessionUser.name, sessionUser.email) ? 'admin' : 'requester') as UserRole,
+          },
+        ]);
+        setCurrentUserUnitName('');
+        setReviewPromptSlots(defaultReviewPromptSlots);
+        setEditingReviewPromptIndex(0);
+        setSelectedReviewPromptIndex(0);
         setReviewPromptLoaded(true);
         setMembersLoaded(true);
         return;
@@ -649,24 +410,17 @@ function App() {
           : undefined;
       const normalizedSlots = normalizePromptSlots(currentProfile?.review_prompt_slots ?? (legacyPromptText ? [legacyPromptText] : undefined));
       const normalizedIndex = normalizePromptIndex(currentProfile?.review_prompt_selected_slot);
-      const promptBackup = readPromptBackup(sessionUser.id);
-      const serviceBackup = readServiceNamesBackup(sessionUser.id);
-      const unitNameBackup = readUnitNameBackup(sessionUser.id);
-      const mergedSlots = promptBackup
-        ? normalizedSlots.map((slot, index) => slot || promptBackup.slots[index] || getDefaultReviewPromptSlot(index))
-        : normalizedSlots;
-      const mergedIndex = normalizedIndex || promptBackup?.selectedSlot || 0;
-      setReviewPromptSlots(mergedSlots);
-      setEditingReviewPromptIndex(mergedIndex);
-      setSelectedReviewPromptIndex(mergedIndex);
-      setCurrentUserUnitName(currentProfile?.unit_name ?? unitNameBackup);
+      setReviewPromptSlots(normalizedSlots);
+      setEditingReviewPromptIndex(normalizedIndex);
+      setSelectedReviewPromptIndex(normalizedIndex);
+      setCurrentUserUnitName(currentProfile?.unit_name ?? '');
 
       const currentUserRole = isAdminAccount(sessionUser.name, sessionUser.email) ? 'admin' : 'requester';
       const currentUser = {
         id: sessionUser.id,
         name: sessionUser.name,
         email: sessionUser.email,
-        unitName: currentProfile?.unit_name ?? unitNameBackup,
+        unitName: currentProfile?.unit_name ?? '',
         role: currentUserRole as UserRole,
       };
 
@@ -677,7 +431,22 @@ function App() {
         : [...fetchedMembers, currentUser];
 
       setMembers(mergedMembers);
-      setServiceNames(serviceBackup);
+
+      const { data: serviceData, error: serviceError } = await supabase
+        .from('lr_service_names')
+        .select('name')
+        .order('created_at', { ascending: true });
+
+      if (serviceError) {
+        console.error('Failed to load service names:', serviceError.message);
+      }
+
+      const dbServiceNames = (serviceData ?? [])
+        .map((item) => item.name)
+        .filter((name): name is string => typeof name === 'string' && name.trim().length > 0)
+        .map((name) => name.trim());
+
+      setServiceNames(Array.from(new Set(dbServiceNames)));
       setReviewPromptLoaded(true);
       setMembersLoaded(true);
     };
@@ -692,8 +461,6 @@ function App() {
 
     const timer = window.setTimeout(() => {
       void (async () => {
-        writePromptBackup(sessionUser.id, reviewPromptSlots, selectedReviewPromptIndex);
-
         const { error } = await supabase
           .from('lr_profiles')
           .upsert(
@@ -734,8 +501,6 @@ function App() {
         return;
       }
 
-      const backupRequests = readRequestBackup(sessionUser.id);
-
       const { data, error } = await supabase
         .from('lr_review_requests')
         .select('id, title, requester_name, status, created_at, request_body')
@@ -743,7 +508,7 @@ function App() {
 
       if (error) {
         console.error('Failed to load review requests:', error.message);
-        setRequests(backupRequests);
+        setRequests([]);
         setRequestsLoaded(true);
         return;
       }
@@ -788,12 +553,7 @@ function App() {
             [],
         })) as ReviewRequest[];
 
-      const mergedRequests = [
-        ...dbRequests,
-        ...backupRequests.filter((backup) => !dbRequests.some((item) => item.id === backup.id)),
-      ];
-
-      setRequests(mergedRequests);
+      setRequests(dbRequests);
       setRequestsLoaded(true);
     };
 
@@ -801,27 +561,9 @@ function App() {
   }, [sessionUser]);
 
   useEffect(() => {
-    if (!isSupabaseConfigured || !sessionUser || !requestsLoaded) {
-      return;
-    }
-
-    writeRequestBackup(sessionUser.id, requests);
-  }, [requests, requestsLoaded, sessionUser]);
-
-  useEffect(() => {
-    if (!sessionUser) {
-      return;
-    }
-
-    writeServiceNamesBackup(sessionUser.id, serviceNames);
-  }, [serviceNames, sessionUser]);
-
-  useEffect(() => {
     if (!sessionUser || !membersLoaded) {
       return;
     }
-
-    writeUnitNameBackup(sessionUser.id, currentUserUnitName);
 
     if (!isSupabaseConfigured) {
       return;
@@ -854,27 +596,11 @@ function App() {
   }, [currentUserUnitName, membersLoaded, sessionUser]);
 
   useEffect(() => {
-    if (!sessionUser || !requestsLoaded || reviewGuideLoading) {
-      return;
-    }
-
-    const backup = readReviewGuideBackup(sessionUser.id);
-    if (!backup) return;
-
-    if (backup.selectedRequestId && requests.some((item) => item.id === backup.selectedRequestId)) {
-      setSelectedRequestId(backup.selectedRequestId);
-      setReviewGuideText(backup.reviewGuideText);
-    }
-  }, [requests, requestsLoaded, reviewGuideLoading, sessionUser]);
-
-  useEffect(() => {
     const loadReviewResults = async () => {
       if (!isSupabaseConfigured || !sessionUser) {
         setReviewResults([]);
         return;
       }
-
-      const backupResults = readReviewResultsBackup(sessionUser.id);
 
       const { data, error } = await supabase
         .from('lr_review_results')
@@ -885,7 +611,7 @@ function App() {
 
       if (error) {
         console.error('Failed to load review results:', error.message);
-        setReviewResults(backupResults);
+        setReviewResults([]);
         return;
       }
 
@@ -921,9 +647,6 @@ function App() {
 
       setReviewResults([
         ...dbResults.map(enrichResult),
-        ...backupResults
-          .filter((backup) => !dbResults.some((item) => item.id === backup.id))
-          .map(enrichResult),
       ]);
     };
 
@@ -1150,23 +873,14 @@ function App() {
           attachments,
         });
         setReviewGuideText(guide);
-        if (sessionUser) {
-          writeReviewGuideBackup(sessionUser.id, requestId, guide);
-        }
       } else {
         setReviewGuideText('');
         setReviewGuideError('OpenAI 설정이 없어 AI 검토 안내를 생성하지 못했습니다.');
-        if (sessionUser) {
-          writeReviewGuideBackup(sessionUser.id, requestId, '');
-        }
       }
     } catch (error) {
       setReviewGuideText('');
       setReviewGuideError(error instanceof Error ? error.message : 'OpenAI 검토 안내 생성에 실패했습니다.');
       console.error('OpenAI review guide generation failed:', error);
-      if (sessionUser) {
-        writeReviewGuideBackup(sessionUser.id, requestId, '');
-      }
     } finally {
       if (reviewGuideProgressTimerRef.current !== null) {
         window.clearInterval(reviewGuideProgressTimerRef.current);
@@ -1205,10 +919,6 @@ function App() {
     setReviewGuideText('');
     setReviewResults((current) => {
       const next = [resultEntry, ...current.filter((item) => item.id !== resultId)];
-      if (sessionUser) {
-        writeReviewResultsBackup(sessionUser.id, next);
-        writeReviewGuideBackup(sessionUser.id, null, '');
-      }
       return next;
     });
 
@@ -1298,11 +1008,41 @@ function App() {
   const addServiceName = (name: string) => {
     const trimmed = name.trim();
     if (!trimmed) return;
-    setServiceNames((current) => (current.includes(trimmed) ? current : [...current, trimmed]));
+    setServiceNames((current) => {
+      if (current.includes(trimmed)) return current;
+      const next = [...current, trimmed];
+
+      if (isSupabaseConfigured && sessionUser) {
+        void (async () => {
+          const { error } = await supabase.from('lr_service_names').upsert(
+            { name: trimmed },
+            { onConflict: 'name' },
+          );
+          if (error) {
+            console.error('Failed to save service name:', error.message);
+          }
+        })();
+      }
+
+      return next;
+    });
   };
 
   const removeServiceName = (name: string) => {
-    setServiceNames((current) => current.filter((item) => item !== name));
+    setServiceNames((current) => {
+      const next = current.filter((item) => item !== name);
+
+      if (isSupabaseConfigured && sessionUser) {
+        void (async () => {
+          const { error } = await supabase.from('lr_service_names').delete().eq('name', name);
+          if (error) {
+            console.error('Failed to delete service name:', error.message);
+          }
+        })();
+      }
+
+      return next;
+    });
   };
 
   const updateMemberRole = (memberId: string, role: UserRole) => {
