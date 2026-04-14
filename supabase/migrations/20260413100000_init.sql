@@ -56,19 +56,11 @@ alter table public.lr_review_attachments enable row level security;
 alter table public.lr_review_results enable row level security;
 alter table public.lr_review_logs enable row level security;
 
-create policy "Profiles readable by self or admin"
+create policy "Profiles readable by authenticated users"
 on public.lr_profiles
 for select
 to authenticated
-using (
-  auth.uid() = id
-  or exists (
-    select 1
-    from public.lr_profiles p
-    where p.id = auth.uid()
-      and p.role = 'admin'
-  )
-);
+using (auth.role() = 'authenticated');
 
 create policy "Profiles update by self or admin"
 on public.lr_profiles
