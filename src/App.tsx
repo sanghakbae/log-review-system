@@ -1468,7 +1468,6 @@ function App() {
             {activeView === 'review-result' && (
               <ReviewResultView
                 currentUserName={sessionUser?.name ?? '미로그인'}
-                pendingRequestCount={pendingRequestCount}
                 requests={requests}
                 selectedRequestId={selectedRequestId}
                 reviewGuideText={reviewGuideText}
@@ -1853,7 +1852,6 @@ function ReviewResultView({
   reviewGuideLoading,
   reviewGuideProgress,
   reviewGuideError,
-  pendingRequestCount,
   currentUserName,
   onSelectRequest,
   onStartReview,
@@ -1865,7 +1863,6 @@ function ReviewResultView({
   reviewGuideLoading: boolean;
   reviewGuideProgress: number;
   reviewGuideError: string | null;
-  pendingRequestCount: number;
   currentUserName: string;
   onSelectRequest: (requestId: string | null) => void;
   onStartReview: (requestId: string) => Promise<void>;
@@ -1881,6 +1878,21 @@ function ReviewResultView({
   useEffect(() => {
     setReviewResultText('');
   }, [selectedRequestId]);
+
+  useEffect(() => {
+    if (requests.length === 0) {
+      return;
+    }
+
+    const selectedExists = selectedRequestId ? requests.some((request) => request.id === selectedRequestId) : false;
+    if (!selectedRequestId || !selectedExists) {
+      const latestRequest = requests[0];
+      if (latestRequest) {
+        // Keep the review screen usable without exposing a manual request list.
+        onSelectRequest(latestRequest.id);
+      }
+    }
+  }, [onSelectRequest, requests, selectedRequestId]);
 
   const handleStartReview = () => {
     if (!selectedRequest) return;
@@ -1899,74 +1911,10 @@ function ReviewResultView({
       <article className="detail-card">
         <div className="detail-header compact">
           <div>
-            <h2 className="text-14">검토 대상 목록</h2>
-            <div className="meta-line">
-              <span className="status-dot" />
-              <span className="text-12">대기 {pendingRequestCount}건</span>
-            </div>
-          </div>
-          <button className="primary-btn text-12" type="button" onClick={handleStartReview} disabled={!selectedRequest || reviewGuideLoading}>
-            <span className="text-12">{reviewGuideLoading ? '검토 중...' : '검토'}</span>
-          </button>
-        </div>
-        <div className="table-card dense-table">
-          <div className="table">
-            <div className="table-row table-head review-queue-head">
-              <span className="text-14">신청 건</span>
-              <span className="text-14">요청자</span>
-              <span className="text-14">서비스명</span>
-              <span className="text-14">첨부 파일</span>
-              <span className="text-14">선택</span>
-            </div>
-            {requests.length === 0 ? (
-              <div className="empty-state">검토할 신청 건이 없습니다.</div>
-            ) : (
-              requests.map((request) => (
-                <div
-                  className={`table-row review-queue-row ${selectedRequestId === request.id ? 'active-row' : ''}`}
-                  key={request.id}
-                  onClick={() => onSelectRequest(selectedRequestId === request.id ? null : request.id)}
-                  role="button"
-                  tabIndex={0}
-                >
-                  <span className="text-12">{request.title}</span>
-                  <span className="text-12">{request.requester_name}</span>
-                  <span className="text-12">{request.service_name || '-'}</span>
-                  <span className="text-12">
-                    {request.file_summaries?.length
-                      ? `${request.file_summaries.length}개 / ${request.file_summaries
-                          .map((file) => file.fileName)
-                          .join(', ')}`
-                      : `${request.log_file_count ?? 0}개`}
-                  </span>
-                  <span>
-                    <button
-                      className={`check-btn ${selectedRequestId === request.id ? 'selected' : ''}`}
-                      type="button"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        onSelectRequest(selectedRequestId === request.id ? null : request.id);
-                      }}
-                      aria-pressed={selectedRequestId === request.id}
-                      aria-label={`${request.title} 선택`}
-                    >
-                      <span className="text-12">{selectedRequestId === request.id ? '✓' : ''}</span>
-                    </button>
-                  </span>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-      </article>
-
-      <article className="detail-card">
-        <div className="detail-header compact">
-          <div>
             <h2 className="text-14">AI 검토 안내</h2>
             <div className="meta-line">
               <span className="status-dot" />
-              <span className="text-12">선택한 신청 건을 바탕으로 요약합니다</span>
+              <span className="text-12">최신 신청 건을 자동으로 바탕으로 요약합니다</span>
             </div>
           </div>
         </div>
@@ -2012,7 +1960,7 @@ function ReviewResultView({
               </div>
             ) : (
               <pre className="review-guide-fallback text-12">
-                {reviewGuideText || '검토할 신청 건을 선택한 뒤 [검토]를 누르세요.'}
+                {reviewGuideText || '검토할 신청 건이 없으면 최신 요청이 자동 선택됩니다.'}
               </pre>
             )}
           </div>
@@ -2026,7 +1974,9 @@ function ReviewResultView({
             <h2 className="text-14">검토 결과 작성</h2>
             <div className="meta-line">
               <span className="status-dot" />
-              <span className="text-12">{selectedRequest ? selectedRequest.requester_name : '신청 건을 선택하세요'}</span>
+              <span className="text-12">
+                {selectedRequest ? selectedRequest.requester_name : '검토할 신청 건이 없습니다'}
+              </span>
             </div>
           </div>
         </div>
@@ -2049,6 +1999,9 @@ function ReviewResultView({
           </div>
         </div>
         <div className="request-actions">
+          <button className="primary-btn text-12" type="button" onClick={handleStartReview} disabled={!selectedRequest || reviewGuideLoading}>
+            <span className="text-12">{reviewGuideLoading ? '검토 중...' : '검토'}</span>
+          </button>
           <button className="primary-btn text-12" type="button" onClick={handleCompleteReview} disabled={!selectedRequest}>
             <span className="text-12">검토 완료</span>
           </button>
