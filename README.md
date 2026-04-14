@@ -66,7 +66,16 @@ npm run preview
 
 ## 환경 변수
 
-프로젝트 루트의 `.env.local` 파일에 아래 값을 설정합니다.
+프로젝트 루트에는 보통 다음 두 파일을 사용합니다.
+
+- `.env.example`
+  - 필요한 키 목록을 보여주는 예시 파일
+  - 새 환경을 만들 때 복사해 참고하는 용도
+- `.env.local`
+  - 실제 로컬 개발 값이 들어가는 파일
+  - 이 저장소에서는 개발 시 이 파일을 사용합니다
+
+`.env.local` 파일에 아래 값을 설정합니다.
 
 ```bash
 VITE_SUPABASE_URL=https://your-project-ref.supabase.co
