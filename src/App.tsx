@@ -284,6 +284,7 @@ const getResultStorageKey = (userId: string) => `log-review-system:review-result
 const getGuideStorageKey = (userId: string) => `log-review-system:review-guide:${userId}`;
 const getUnitNameStorageKey = (userId: string) => `log-review-system:unit-name:${userId}`;
 const getServiceNamesStorageKey = (userId: string) => `log-review-system:service-names:${userId}`;
+const getOAuthRedirectUrl = () => `${window.location.origin}${window.location.pathname}`;
 
 const readPromptBackup = (userId: string) => {
   if (typeof window === 'undefined') {
@@ -1240,7 +1241,7 @@ function App() {
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {
-        redirectTo: window.location.origin,
+        redirectTo: getOAuthRedirectUrl(),
         queryParams: {
           access_type: 'offline',
           prompt: 'select_account',
