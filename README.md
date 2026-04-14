@@ -163,6 +163,24 @@ Google OAuth를 사용하려면 Supabase Auth와 Google Cloud Console을 둘 다
 npm run dev -- --host 127.0.0.1 --port 5173
 ```
 
+## GitHub Pages 배포
+
+이 저장소에는 `main` 브랜치 푸시 시 동작하는 GitHub Actions 워크플로우가 포함되어 있습니다.
+
+- 워크플로우 파일: `.github/workflows/deploy.yml`
+- 정적 빌드 결과물: `dist`
+- 배포 대상: GitHub Pages
+
+배포 전에 GitHub repository secrets에 아래 값을 등록합니다.
+
+- `VITE_SUPABASE_URL`
+- `VITE_SUPABASE_ANON_KEY`
+- `OPENAI_API_KEY`
+- `OPENAI_MODEL`
+- `LLM_PROVIDER`
+
+워크플로우는 이 값을 빌드 시점에 주입해서 배포합니다. 값이 없으면 앱은 열리지만 Supabase 및 OpenAI 연동 기능은 비활성화됩니다.
+
 ## 다음 작업 후보
 
 - 파일 업로드 흐름의 세부 UX 개선
