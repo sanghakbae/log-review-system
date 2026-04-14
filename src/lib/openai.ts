@@ -1,6 +1,4 @@
 type ReviewRequestInput = {
-  title: string;
-  requesterName: string;
   serviceName?: string;
   logFileCount?: number;
   promptText?: string;
@@ -13,11 +11,26 @@ type ReviewRequestInput = {
   }>;
 };
 
+type OpenAISettingsInput = {
+  apiKey?: string | null;
+  model?: string | null;
+};
+
 const apiKey = import.meta.env.OPENAI_API_KEY as string | undefined;
 const model = (import.meta.env.OPENAI_MODEL as string | undefined) ?? 'gpt-4o-mini';
 const provider = import.meta.env.LLM_PROVIDER as string | undefined;
 
-export const isOpenAIConfigured = Boolean(apiKey && model && provider === 'openai');
+const resolveOpenAISettings = (settings?: OpenAISettingsInput) => {
+  const resolvedApiKey = settings?.apiKey?.trim() || apiKey;
+  const resolvedModel = settings?.model?.trim() || model;
+  const resolvedProvider = 'openai';
+  return { apiKey: resolvedApiKey, model: resolvedModel, provider: resolvedProvider };
+};
+
+export const isOpenAIConfigured = (settings?: OpenAISettingsInput) => {
+  const resolved = resolveOpenAISettings(settings);
+  return Boolean(resolved.apiKey && resolved.model && resolved.provider === 'openai');
+};
 
 const extractOutputText = (payload: unknown) => {
   if (!payload || typeof payload !== 'object') return '';
@@ -83,23 +96,25 @@ const getDateRuleInstruction = () =>
     '날짜가 불명확하면 주말 여부를 단정하지 말고 "확인 불가" 또는 "-"로 적어라.',
   ].join(' ');
 
-export const generateReviewGuide = async (request: ReviewRequestInput) => {
-  if (!isOpenAIConfigured) {
+export const generateReviewGuide = async (request: ReviewRequestInput, settings?: OpenAISettingsInput) => {
+  const resolved = resolveOpenAISettings(settings);
+
+  if (!isOpenAIConfigured(settings)) {
     throw new Error('OpenAI 설정이 없습니다.');
   }
 
   const response = await fetch('https://api.openai.com/v1/responses', {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${apiKey}`,
+      Authorization: `Bearer ${resolved.apiKey}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model,
+      model: resolved.model,
       input: [
         {
-          role: 'system',
-          content:
+      role: 'system',
+      content:
             'You are a log review assistant. Reply in Korean and output only one Markdown table. Use exactly these columns: 항목, 내용, 판단, 근거, 조치. Do not add any prose before or after the table. Use concise sentences. Base your analysis primarily on the uploaded file contents and the attached prompt. If a field is missing, write -. Do not use code fences. When judging dates, use calendar-based weekday verification only. Never infer weekend status from a date string without checking the actual weekday. If a date is mentioned, the evidence cell must include the exact date string and the weekday together.',
         },
         {
@@ -112,8 +127,6 @@ export const generateReviewGuide = async (request: ReviewRequestInput) => {
                 `첨부 파일 내용이 가장 중요하며, 프롬프트는 분석 방향을 보강하는 용도로만 사용해.\n\n` +
                 `등록 프롬프트:\n${request.promptText?.trim() || '-'}\n\n` +
                 `검토 대상 정보:\n` +
-                `- 요청 제목: ${request.title}\n` +
-                `- 요청자: ${request.requesterName}\n` +
                 `- 서비스명: ${request.serviceName ?? '-'}\n` +
                 `- 첨부 파일 수: ${request.logFileCount ?? 0}개\n` +
                 `- 첨부 파일 목록: ${(request.attachments ?? []).map((item) => item.fileName).join(', ') || '-'}\n` +

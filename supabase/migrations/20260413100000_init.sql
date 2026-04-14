@@ -5,8 +5,14 @@ create table if not exists public.lr_profiles (
   email text,
   full_name text,
   role text not null default 'requester' check (role in ('requester', 'reviewer', 'admin')),
+  google_chat_webhook_url text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
+);
+
+create table if not exists public.lr_admin_emails (
+  email text primary key,
+  created_at timestamptz not null default now()
 );
 
 create table if not exists public.lr_service_names (
@@ -15,12 +21,20 @@ create table if not exists public.lr_service_names (
   created_at timestamptz not null default now()
 );
 
+create table if not exists public.lr_google_chat_webhooks (
+  id uuid primary key default gen_random_uuid(),
+  url text not null unique,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
 create table if not exists public.lr_review_requests (
   id uuid primary key default gen_random_uuid(),
   title text not null,
   requester_id uuid not null references auth.users(id) on delete cascade,
   requester_name text not null,
   request_body text,
+  request_created_at timestamptz,
   status text not null default 'submitted' check (status in ('submitted', 'in_review', 'done', 'rejected')),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -57,7 +71,9 @@ create table if not exists public.lr_review_logs (
 );
 
 alter table public.lr_profiles enable row level security;
+alter table public.lr_admin_emails enable row level security;
 alter table public.lr_service_names enable row level security;
+alter table public.lr_google_chat_webhooks enable row level security;
 alter table public.lr_review_requests enable row level security;
 alter table public.lr_review_attachments enable row level security;
 alter table public.lr_review_results enable row level security;
@@ -83,6 +99,56 @@ using (
   )
 );
 
+create policy "Admin emails readable by authenticated users"
+on public.lr_admin_emails
+for select
+to authenticated
+using (auth.role() = 'authenticated');
+
+create policy "Admin emails manageable by admin"
+on public.lr_admin_emails
+for all
+to authenticated
+using (
+  exists (
+    select 1
+    from public.lr_profiles p
+    where p.id = auth.uid()
+      and p.role = 'admin'
+  )
+)
+with check (
+  exists (
+    select 1
+    from public.lr_profiles p
+    where p.id = auth.uid()
+      and p.role = 'admin'
+  )
+);
+
+create or replace function public.set_profile_role_from_admin_emails()
+returns trigger
+language plpgsql
+security definer
+as $$
+begin
+  if exists (
+    select 1
+    from public.lr_admin_emails a
+    where lower(a.email) = lower(new.email)
+  ) then
+    new.role := 'admin';
+  end if;
+
+  return new;
+end;
+$$;
+
+create trigger trg_set_profile_role_from_admin_emails
+before insert or update on public.lr_profiles
+for each row
+execute function public.set_profile_role_from_admin_emails();
+
 create policy "Service names readable by authenticated users"
 on public.lr_service_names
 for select
@@ -91,6 +157,33 @@ using (auth.role() = 'authenticated');
 
 create policy "Service names manageable by admin"
 on public.lr_service_names
+for all
+to authenticated
+using (
+  exists (
+    select 1
+    from public.lr_profiles p
+    where p.id = auth.uid()
+      and p.role = 'admin'
+  )
+)
+with check (
+  exists (
+    select 1
+    from public.lr_profiles p
+    where p.id = auth.uid()
+      and p.role = 'admin'
+  )
+);
+
+create policy "Google Chat webhooks readable by authenticated users"
+on public.lr_google_chat_webhooks
+for select
+to authenticated
+using (auth.role() = 'authenticated');
+
+create policy "Google Chat webhooks manageable by admin"
+on public.lr_google_chat_webhooks
 for all
 to authenticated
 using (

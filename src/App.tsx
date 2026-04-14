@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { isSupabaseConfigured, supabase } from './lib/supabase';
 import { generateReviewGuide, isOpenAIConfigured } from './lib/openai';
 
 type ViewId = 'dashboard' | 'review-write' | 'review-result' | 'result-log' | 'permissions';
 type UserRole = 'requester' | 'reviewer' | 'admin';
+type PermissionSectionId = 'members' | 'webhook' | 'prompts' | 'openai' | 'services';
 
 type ReviewRequest = {
   id: string;
@@ -30,8 +31,8 @@ type ReviewFileSummary = {
 type ReviewResultEntry = {
   id: string;
   requestId: string;
-  requestName: string;
   serviceName: string;
+  requesterName: string;
   requestCreatedAt: string;
   reviewerName: string;
   completedAt: string;
@@ -64,6 +65,11 @@ type ReviewSubmission = {
   logFiles: ReviewUploadFile[];
 };
 
+type ReviewSubmissionResult = {
+  ok: boolean;
+  errorMessage?: string;
+};
+
 type ReviewUploadFile = {
   id: string;
   file: File;
@@ -73,6 +79,16 @@ type ReviewUploadFile = {
 type StoredReviewRequestBody = {
   serviceName?: string;
   logFiles?: ReviewFileSummary[];
+};
+
+type ProfileSummary = {
+  id: string;
+  email: string | null;
+  full_name: string | null;
+  unit_name: string | null;
+  role: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
 };
 
 type ReviewGuideRow = {
@@ -98,14 +114,18 @@ const roleLabel: Record<UserRole, string> = {
 };
 
 const accessByRole: Record<UserRole, ViewId[]> = {
-  requester: ['dashboard', 'review-write', 'permissions'],
-  reviewer: ['dashboard', 'review-write', 'review-result', 'result-log', 'permissions'],
+  requester: ['dashboard', 'review-write'],
+  reviewer: ['dashboard', 'review-write', 'review-result', 'result-log'],
   admin: ['dashboard', 'review-write', 'review-result', 'result-log', 'permissions'],
 };
 
 const reviewPromptSlotCount = 10;
-const adminAccountMatchers = ['배상학', 'shbae@muhayu.com'];
 const reviewUploadBucket = 'review-uploads';
+const googleChatWebhookTable = 'lr_google_chat_webhooks';
+const reviewPromptTable = 'lr_review_prompt_settings';
+const reviewPromptScriptsTable = 'lr_review_prompt_scripts';
+const aiSettingsTable = 'lr_ai_settings';
+const isEndorphinAdminName = (name?: string | null) => name?.trim() === '엔돌핀';
 const defaultReviewPromptSlots = [
   [
     '너는 범용 업무 검토 분석가다.',
@@ -127,17 +147,6 @@ const defaultReviewPromptSlots = [
 ];
 const defaultReviewPrompt = defaultReviewPromptSlots[0];
 const getDefaultReviewPromptSlot = (index: number) => defaultReviewPromptSlots[index] ?? '';
-
-const normalizeText = (value: string) => value.trim().toLowerCase();
-
-const isAdminAccount = (name: string, email: string) => {
-  const normalizedName = normalizeText(name);
-  const normalizedEmail = normalizeText(email);
-  return adminAccountMatchers.some((matcher) => {
-    const normalizedMatcher = normalizeText(matcher);
-    return normalizedName === normalizedMatcher || normalizedEmail === normalizedMatcher;
-  });
-};
 
 const getSessionUser = (
   session: {
@@ -168,6 +177,24 @@ const getAvatarInitials = (name: string) => {
   if (!compact) return '미지';
   const chars = Array.from(compact);
   return chars.slice(0, 2).join('');
+};
+
+const formatKoreaDateTime = (value?: string | Date | null) => {
+  if (!value) return '-';
+
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return '-';
+
+  return new Intl.DateTimeFormat('ko-KR', {
+    timeZone: 'Asia/Seoul',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(date);
 };
 
 const parseReviewGuideTable = (text: string) => {
@@ -278,6 +305,113 @@ const normalizePromptIndex = (value: unknown) => {
   return value;
 };
 
+const sendGoogleChatWebhook = async (webhookUrl: string, payload: { text: string }) => {
+  const trimmedWebhookUrl = webhookUrl.trim();
+  if (!trimmedWebhookUrl) {
+    return false;
+  }
+
+  try {
+    if (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
+      const beaconBody = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+      if (navigator.sendBeacon(trimmedWebhookUrl, beaconBody)) {
+        return true;
+      }
+    }
+
+    const response = await fetch(trimmedWebhookUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+    return response.ok;
+  } catch (error) {
+    console.error('Failed to send Google Chat webhook:', error);
+    return false;
+  }
+};
+
+const loadGoogleChatWebhookUrls = async () => {
+  const { data, error } = await supabase
+    .from(googleChatWebhookTable)
+    .select('url')
+    .order('created_at', { ascending: true });
+
+  if (error) {
+    throw error;
+  }
+
+  return (data ?? [])
+    .map((row) => row.url)
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    .map((value) => value.trim());
+};
+
+const loadReviewPromptSettings = async () => {
+  const { data, error } = await supabase
+    .from(reviewPromptTable)
+    .select('review_prompt_text, review_prompt_slots, review_prompt_selected_slot')
+    .eq('id', 'default')
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return {
+    reviewPromptText: typeof data?.review_prompt_text === 'string' ? data.review_prompt_text : null,
+    reviewPromptSlots: data?.review_prompt_slots ?? null,
+    reviewPromptSelectedSlot: data?.review_prompt_selected_slot ?? null,
+  };
+};
+
+const loadReviewPromptScripts = async () => {
+  const { data, error } = await supabase
+    .from(reviewPromptScriptsTable)
+    .select('slot_index, prompt_script, is_selected')
+    .order('slot_index', { ascending: true });
+
+  if (error) {
+    throw error;
+  }
+
+  const rows = (data ?? []).filter(
+    (row): row is { slot_index: number; prompt_script: string; is_selected: boolean } =>
+      typeof row.slot_index === 'number' && typeof row.prompt_script === 'string',
+  );
+
+  if (rows.length === 0) {
+    return null;
+  }
+
+  const slots = Array.from({ length: reviewPromptSlotCount }, (_, index) => rows.find((row) => row.slot_index === index)?.prompt_script ?? '');
+  const selectedSlot = rows.find((row) => row.is_selected)?.slot_index ?? 0;
+
+  return {
+    reviewPromptSlots: slots,
+    reviewPromptSelectedSlot: selectedSlot,
+  };
+};
+
+const loadAISettings = async () => {
+  const { data, error } = await supabase
+    .from(aiSettingsTable)
+    .select('openai_api_key, openai_model')
+    .eq('id', 'default')
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return {
+    openaiApiKey: typeof data?.openai_api_key === 'string' ? data.openai_api_key : '',
+    openaiModel: typeof data?.openai_model === 'string' && data.openai_model.trim() ? data.openai_model : 'gpt-4o-mini',
+  };
+};
+
 const getOAuthRedirectUrl = () => `${window.location.origin}${window.location.pathname}`;
 
 function App() {
@@ -298,12 +432,89 @@ function App() {
   const [selectedReviewPromptIndex, setSelectedReviewPromptIndex] = useState(0);
   const [reviewPromptLoaded, setReviewPromptLoaded] = useState(false);
   const [currentUserUnitName, setCurrentUserUnitName] = useState('');
+  const [googleChatWebhookInput, setGoogleChatWebhookInput] = useState('');
+  const [googleChatWebhookUrls, setGoogleChatWebhookUrls] = useState<string[]>([]);
+  const [openAIApiKeyInput, setOpenAIApiKeyInput] = useState('');
+  const [openAIModel, setOpenAIModel] = useState('gpt-4o-mini');
   const [members, setMembers] = useState<Member[]>([]);
   const [membersLoaded, setMembersLoaded] = useState(false);
+  const [currentProfileRole, setCurrentProfileRole] = useState<UserRole>('requester');
   const [reviewResults, setReviewResults] = useState<ReviewResultEntry[]>([]);
+  const [selectedRequestIds, setSelectedRequestIds] = useState<string[]>([]);
+  const [selectedResultIds, setSelectedResultIds] = useState<string[]>([]);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [saveNotice, setSaveNotice] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
+  const [profileSyncVersion, setProfileSyncVersion] = useState(0);
   const reviewGuideProgressTimerRef = useRef<number | null>(null);
+  const reviewPromptSnapshotRef = useRef('');
+  const currentUserUnitNameSnapshotRef = useRef('');
+  const googleChatWebhookUrlsSnapshotRef = useRef<string[]>([]);
   const activeReviewPromptText = reviewPromptSlots[selectedReviewPromptIndex] ?? defaultReviewPrompt;
+
+  const showSaveNotice = (kind: 'success' | 'error', message: string) => {
+    setSaveNotice({ kind, message });
+    window.setTimeout(() => setSaveNotice(null), 1800);
+  };
+
+  const persistGoogleChatWebhookUrl = async (webhookUrl: string) => {
+    if (!isSupabaseConfigured || !sessionUser || currentUserRole !== 'admin') {
+      showSaveNotice('error', '저장 실패');
+      return;
+    }
+
+    const normalized = webhookUrl.trim();
+    if (!normalized) {
+      showSaveNotice('error', '저장 실패');
+      return;
+    }
+
+    const { error } = await supabase
+      .from(googleChatWebhookTable)
+      .upsert({ url: normalized }, { onConflict: 'url' });
+
+    if (error) {
+      console.error('Failed to save Google Chat webhook URL:', error.message);
+      showSaveNotice('error', '저장 실패');
+      return;
+    }
+
+    setGoogleChatWebhookUrls((current) => {
+      if (current.includes(normalized)) {
+        return current;
+      }
+      return [...current, normalized];
+    });
+    googleChatWebhookUrlsSnapshotRef.current = Array.from(new Set([...googleChatWebhookUrlsSnapshotRef.current, normalized]));
+    setGoogleChatWebhookInput('');
+    showSaveNotice('success', '저장 성공');
+  };
+
+  const saveOpenAISettings = async () => {
+    if (!isSupabaseConfigured || !sessionUser || currentUserRole !== 'admin') {
+      showSaveNotice('error', '저장 실패');
+      return;
+    }
+
+    const { error } = await supabase
+      .from(aiSettingsTable)
+      .upsert(
+        {
+          id: 'default',
+          openai_api_key: openAIApiKeyInput.trim(),
+          openai_model: openAIModel,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'id' },
+      );
+
+    if (error) {
+      console.error('Failed to save OpenAI settings:', error.message);
+      showSaveNotice('error', '저장 실패');
+      return;
+    }
+
+    showSaveNotice('success', '저장 성공');
+  };
 
   useEffect(() => {
     if (!isSupabaseConfigured) {
@@ -335,14 +546,25 @@ function App() {
         return;
       }
 
-      const role: UserRole = isAdminAccount(sessionUser.name, sessionUser.email) ? 'admin' : 'requester';
+      const { data: existingProfile, error: selectError } = await supabase
+        .from('lr_profiles')
+        .select('id, role')
+        .eq('id', sessionUser.id)
+        .maybeSingle();
+
+      if (selectError) {
+        console.error('Failed to check profile on login:', selectError.message);
+      }
 
       const { error } = await supabase.from('lr_profiles').upsert(
         {
           id: sessionUser.id,
           email: sessionUser.email,
           full_name: sessionUser.name,
-          role,
+          role: isEndorphinAdminName(sessionUser.name)
+            ? 'admin'
+            : (existingProfile?.role as UserRole | undefined) ?? 'requester',
+          updated_at: new Date().toISOString(),
         },
         { onConflict: 'id' },
       );
@@ -350,6 +572,8 @@ function App() {
       if (error) {
         console.error('Failed to sync profile on login:', error.message);
       }
+
+      setProfileSyncVersion((current) => current + 1);
     };
 
     void syncProfile();
@@ -361,11 +585,22 @@ function App() {
         setMembers([]);
         setServiceNames([]);
         setCurrentUserUnitName('');
+        setGoogleChatWebhookUrls([]);
+        setGoogleChatWebhookInput('');
+        setOpenAIApiKeyInput('');
+        setOpenAIModel('gpt-4o-mini');
         setReviewPromptSlots(defaultReviewPromptSlots);
         setEditingReviewPromptIndex(0);
         setSelectedReviewPromptIndex(0);
         setReviewPromptLoaded(false);
         setMembersLoaded(true);
+        setCurrentProfileRole('requester');
+        reviewPromptSnapshotRef.current = JSON.stringify({
+          slots: defaultReviewPromptSlots,
+          selectedSlot: 0,
+        });
+        currentUserUnitNameSnapshotRef.current = '';
+        googleChatWebhookUrlsSnapshotRef.current = [];
         return;
       }
 
@@ -374,63 +609,101 @@ function App() {
 
       const { data, error } = await supabase
         .from('lr_profiles')
-        .select('id, email, full_name, unit_name, role, review_prompt_text, review_prompt_slots, review_prompt_selected_slot');
+        .select('id, email, full_name, unit_name, role');
 
       if (error) {
-        setMembers([
-          {
-            id: sessionUser.id,
-            name: sessionUser.name,
-            email: sessionUser.email,
-            unitName: '',
-            role: (isAdminAccount(sessionUser.name, sessionUser.email) ? 'admin' : 'requester') as UserRole,
-          },
-        ]);
+        setMembers([]);
         setCurrentUserUnitName('');
+        setGoogleChatWebhookUrls([]);
+        setGoogleChatWebhookInput('');
+        setOpenAIApiKeyInput('');
+        setOpenAIModel('gpt-4o-mini');
         setReviewPromptSlots(defaultReviewPromptSlots);
         setEditingReviewPromptIndex(0);
         setSelectedReviewPromptIndex(0);
         setReviewPromptLoaded(true);
         setMembersLoaded(true);
+        setCurrentProfileRole('requester');
         return;
       }
 
-      const fetchedMembers = (data ?? []).map((profile) => ({
+      const profileRows = (data ?? []) as ProfileSummary[];
+
+      const fetchedMembers = profileRows.map((profile) => ({
         id: profile.id,
         name: profile.full_name ?? profile.email ?? '미지정',
         email: profile.email ?? '',
         unitName: profile.unit_name ?? '',
-        role: isAdminAccount(profile.full_name ?? '', profile.email ?? '') ? 'admin' : profile.role,
+        role: isEndorphinAdminName(profile.full_name) ? 'admin' : (profile.role as UserRole) ?? 'requester',
       }));
 
-      const currentProfile = (data ?? []).find((profile) => profile.id === sessionUser.id) ?? null;
-      const legacyPromptText =
-        typeof currentProfile?.review_prompt_text === 'string' && currentProfile.review_prompt_text.trim()
-          ? currentProfile.review_prompt_text
-          : undefined;
-      const normalizedSlots = normalizePromptSlots(currentProfile?.review_prompt_slots ?? (legacyPromptText ? [legacyPromptText] : undefined));
-      const normalizedIndex = normalizePromptIndex(currentProfile?.review_prompt_selected_slot);
-      setReviewPromptSlots(normalizedSlots);
-      setEditingReviewPromptIndex(normalizedIndex);
-      setSelectedReviewPromptIndex(normalizedIndex);
+      const { data: currentProfileData, error: currentProfileError } = await supabase
+        .from('lr_profiles')
+        .select('id, email, full_name, unit_name, role')
+        .eq('id', sessionUser.id)
+        .maybeSingle();
+
+      if (currentProfileError) {
+        console.error('Failed to load current profile:', currentProfileError.message);
+      }
+
+      const currentProfile = (currentProfileData as ProfileSummary | null) ?? profileRows.find((profile) => profile.id === sessionUser.id) ?? null;
+      const currentMember = fetchedMembers.find((member) => member.id === sessionUser.id) ?? null;
       setCurrentUserUnitName(currentProfile?.unit_name ?? '');
+      setCurrentProfileRole(
+        (isEndorphinAdminName(sessionUser.name) ? 'admin' : currentMember?.role ?? currentProfile?.role ?? 'requester') as UserRole,
+      );
+      currentUserUnitNameSnapshotRef.current = currentProfile?.unit_name ?? '';
+      setMembers(fetchedMembers);
 
-      const currentUserRole = isAdminAccount(sessionUser.name, sessionUser.email) ? 'admin' : 'requester';
-      const currentUser = {
-        id: sessionUser.id,
-        name: sessionUser.name,
-        email: sessionUser.email,
-        unitName: currentProfile?.unit_name ?? '',
-        role: currentUserRole as UserRole,
-      };
+      try {
+        const webhookUrls = await loadGoogleChatWebhookUrls();
+        setGoogleChatWebhookUrls(webhookUrls);
+        googleChatWebhookUrlsSnapshotRef.current = webhookUrls;
+      } catch (error) {
+        console.error('Failed to load Google Chat webhook URLs:', error);
+        setGoogleChatWebhookUrls([]);
+        googleChatWebhookUrlsSnapshotRef.current = [];
+      }
 
-      const mergedMembers = fetchedMembers.some(
-        (member) => member.name === currentUser.name || member.email === currentUser.email,
-      )
-        ? fetchedMembers
-        : [...fetchedMembers, currentUser];
+      try {
+        const promptScripts = await loadReviewPromptScripts();
+        const promptSettings = promptScripts ?? (await loadReviewPromptSettings());
+        const normalizedSlots = normalizePromptSlots(
+          promptSettings.reviewPromptSlots ?? ('reviewPromptText' in promptSettings && promptSettings.reviewPromptText
+            ? [promptSettings.reviewPromptText]
+            : undefined),
+        );
+        const normalizedIndex = normalizePromptIndex(promptSettings.reviewPromptSelectedSlot);
+        setReviewPromptSlots(normalizedSlots);
+        setEditingReviewPromptIndex(normalizedIndex);
+        setSelectedReviewPromptIndex(normalizedIndex);
+        reviewPromptSnapshotRef.current = JSON.stringify({
+          slots: normalizedSlots,
+          selectedSlot: normalizedIndex,
+        });
+      } catch (error) {
+        console.error('Failed to load review prompt settings:', error);
+        setReviewPromptSlots(defaultReviewPromptSlots);
+        setEditingReviewPromptIndex(0);
+        setSelectedReviewPromptIndex(0);
+        reviewPromptSnapshotRef.current = JSON.stringify({
+          slots: defaultReviewPromptSlots,
+          selectedSlot: 0,
+        });
+      }
 
-      setMembers(mergedMembers);
+      try {
+        const aiSettings = await loadAISettings();
+        setOpenAIApiKeyInput(aiSettings.openaiApiKey);
+        setOpenAIModel(aiSettings.openaiModel);
+      } catch (error) {
+        console.error('Failed to load OpenAI settings:', error);
+        setOpenAIApiKeyInput('');
+        setOpenAIModel('gpt-4o-mini');
+      }
+
+      setCurrentUserUnitName(currentProfile?.unit_name ?? '');
 
       const { data: serviceData, error: serviceError } = await supabase
         .from('lr_service_names')
@@ -452,22 +725,55 @@ function App() {
     };
 
     void loadMembers();
-  }, [sessionUser]);
+  }, [sessionUser, profileSyncVersion]);
 
   useEffect(() => {
-    if (!isSupabaseConfigured || !sessionUser || !reviewPromptLoaded) {
+    const loadServiceNames = async () => {
+      if (!isSupabaseConfigured || !sessionUser) {
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from('lr_service_names')
+        .select('name')
+        .order('created_at', { ascending: true });
+
+      if (error) {
+        console.error('Failed to load service names:', error.message);
+        return;
+      }
+
+      const dbServiceNames = (data ?? [])
+        .map((item) => item.name)
+        .filter((name): name is string => typeof name === 'string' && name.trim().length > 0)
+        .map((name) => name.trim());
+
+      setServiceNames(Array.from(new Set(dbServiceNames)));
+    };
+
+    void loadServiceNames();
+  }, [activeView, sessionUser]);
+
+  useEffect(() => {
+    if (!isSupabaseConfigured || !sessionUser || !reviewPromptLoaded || currentProfileRole !== 'admin') {
+      return;
+    }
+
+    const nextSnapshot = JSON.stringify({
+      slots: reviewPromptSlots,
+      selectedSlot: selectedReviewPromptIndex,
+    });
+    if (reviewPromptSnapshotRef.current === nextSnapshot) {
       return;
     }
 
     const timer = window.setTimeout(() => {
       void (async () => {
         const { error } = await supabase
-          .from('lr_profiles')
+          .from(reviewPromptTable)
           .upsert(
             {
-              id: sessionUser.id,
-              email: sessionUser.email,
-              full_name: sessionUser.name,
+              id: 'default',
               review_prompt_text: activeReviewPromptText,
               review_prompt_slots: reviewPromptSlots,
               review_prompt_selected_slot: selectedReviewPromptIndex,
@@ -478,12 +784,35 @@ function App() {
 
         if (error) {
           console.error('Failed to save review prompt:', error.message);
+          showSaveNotice('error', '저장 실패');
+          return;
         }
+
+        const promptScriptRows = reviewPromptSlots.map((prompt, index) => ({
+          slot_index: index,
+          title: `프롬프트 ${index + 1}`,
+          prompt_script: prompt,
+          is_selected: index === selectedReviewPromptIndex,
+          updated_at: new Date().toISOString(),
+        }));
+
+        const { error: scriptError } = await supabase
+          .from(reviewPromptScriptsTable)
+          .upsert(promptScriptRows, { onConflict: 'slot_index' });
+
+        if (scriptError) {
+          console.error('Failed to save review prompt scripts:', scriptError.message);
+          showSaveNotice('error', '저장 실패');
+          return;
+        }
+
+        reviewPromptSnapshotRef.current = nextSnapshot;
+        showSaveNotice('success', '저장 성공');
       })();
     }, 400);
 
     return () => window.clearTimeout(timer);
-  }, [activeReviewPromptText, reviewPromptLoaded, reviewPromptSlots, selectedReviewPromptIndex, sessionUser]);
+  }, [activeReviewPromptText, currentProfileRole, reviewPromptLoaded, reviewPromptSlots, selectedReviewPromptIndex, sessionUser]);
 
   useEffect(() => {
     return () => {
@@ -565,13 +894,16 @@ function App() {
       return;
     }
 
+    if (currentUserUnitNameSnapshotRef.current === currentUserUnitName) {
+      return;
+    }
+
     if (!isSupabaseConfigured) {
       return;
     }
 
     const timer = window.setTimeout(() => {
       void (async () => {
-        const role: UserRole = isAdminAccount(sessionUser.name, sessionUser.email) ? 'admin' : 'requester';
         const { error } = await supabase
           .from('lr_profiles')
           .upsert(
@@ -580,7 +912,7 @@ function App() {
               email: sessionUser.email,
               full_name: sessionUser.name,
               unit_name: currentUserUnitName,
-              role,
+              role: currentProfileRole,
               updated_at: new Date().toISOString(),
             },
             { onConflict: 'id' },
@@ -588,68 +920,73 @@ function App() {
 
         if (error) {
           console.error('Failed to save unit name:', error.message);
+          showSaveNotice('error', '저장 실패');
+          return;
         }
+
+        currentUserUnitNameSnapshotRef.current = currentUserUnitName;
+        showSaveNotice('success', '저장 성공');
       })();
     }, 400);
 
     return () => window.clearTimeout(timer);
   }, [currentUserUnitName, membersLoaded, sessionUser]);
 
-  useEffect(() => {
-    const loadReviewResults = async () => {
-      if (!isSupabaseConfigured || !sessionUser) {
-        setReviewResults([]);
-        return;
-      }
+  const loadReviewResults = async () => {
+    if (!isSupabaseConfigured || !sessionUser) {
+      setReviewResults([]);
+      return;
+    }
 
-      const { data, error } = await supabase
-        .from('lr_review_results')
-        .select(
-          'id, request_id, reviewer_id, summary, created_at, request:lr_review_requests(created_at, service_name, requester_name)',
-        )
-        .order('created_at', { ascending: false });
+    const { data, error } = await supabase
+      .from('lr_review_results')
+      .select('id, request_id, reviewer_id, summary, created_at')
+      .order('created_at', { ascending: false });
 
-      if (error) {
-        console.error('Failed to load review results:', error.message);
-        setReviewResults([]);
-        return;
-      }
+    if (error) {
+      console.error('Failed to load review results:', error.message);
+      setReviewResults([]);
+      return;
+    }
 
-      const dbResults = (data ?? []).map((row) => {
-        const requestRow = Array.isArray(row.request) ? row.request[0] : row.request;
-        const reviewerName =
-          members.find((member) => member.id === row.reviewer_id)?.name ??
-          (row.reviewer_id === sessionUser.id ? sessionUser.name : '미지정');
+    const requestIds = Array.from(
+      new Set((data ?? []).map((row) => row.request_id).filter((value): value is string => Boolean(value))),
+    );
+    const { data: requestRows, error: requestLoadError } = requestIds.length
+      ? await supabase
+          .from('lr_review_requests')
+          .select('id, requester_name, service_name, request_created_at, created_at')
+          .in('id', requestIds)
+      : { data: [], error: null };
 
-        return {
-          id: row.id,
-          requestId: row.request_id ?? '',
-          requestName: requestRow?.requester_name ?? '미지정',
-          serviceName: requestRow?.service_name ?? '',
-          requestCreatedAt: requestRow?.created_at ? new Date(requestRow.created_at).toLocaleDateString('ko-KR') : '',
-          reviewerName,
-          completedAt: new Date(row.created_at).toLocaleString('ko-KR'),
-          resultText: row.summary ?? '',
-        };
-      });
+    if (requestLoadError) {
+      console.error('Failed to load result request details:', requestLoadError.message);
+    }
 
-      const enrichResult = (result: ReviewResultEntry) => {
-        const request = requests.find((item) => item.id === result.requestId);
-        return {
-          ...result,
-          requestName: result.requestName || request?.requester_name || '미지정',
-          serviceName: result.serviceName || request?.service_name || '',
-          requestCreatedAt:
-            result.requestCreatedAt ||
-            (request?.request_created_at ? new Date(request.request_created_at).toLocaleString('ko-KR') : ''),
-        };
+    const requestMap = new Map((requestRows ?? []).map((row) => [row.id, row]));
+
+    const dbResults = (data ?? []).map((row) => {
+      const request = requestMap.get(row.request_id ?? '') ?? requests.find((item) => item.id === row.request_id);
+      const reviewerName =
+        members.find((member) => member.id === row.reviewer_id)?.name ??
+        (row.reviewer_id === sessionUser.id ? sessionUser.name : '미지정');
+
+      return {
+        id: row.id,
+        requestId: row.request_id ?? '',
+        serviceName: request?.service_name ?? '',
+        requesterName: request?.requester_name ?? '',
+        requestCreatedAt: formatKoreaDateTime(request?.request_created_at || request?.created_at),
+        reviewerName,
+        completedAt: formatKoreaDateTime(row.created_at),
+        resultText: row.summary ?? '',
       };
+    });
 
-      setReviewResults([
-        ...dbResults.map(enrichResult),
-      ]);
-    };
+    setReviewResults(dbResults);
+  };
 
+  useEffect(() => {
     void loadReviewResults();
   }, [members, requests, sessionUser]);
 
@@ -665,15 +1002,9 @@ function App() {
 
   const currentUserRole = useMemo<UserRole>(() => {
     if (!sessionUser) return 'requester';
-
-    const normalized = sessionUser.name.trim().toLowerCase();
-    const matchedMember = members.find(
-      (member) => member.name.toLowerCase() === normalized || member.email.toLowerCase() === normalized,
-    );
-
-    if (matchedMember) return matchedMember.role;
-    return isAdminAccount(sessionUser.name, sessionUser.email) ? 'admin' : 'requester';
-  }, [members, sessionUser]);
+    return currentProfileRole;
+  }, [currentProfileRole, sessionUser]);
+  const isRoleResolved = !sessionUser || (!loadingAuth && membersLoaded);
 
   const availableNavItems = useMemo(
     () => navItems.filter((item) => accessByRole[currentUserRole].includes(item.id)),
@@ -727,12 +1058,16 @@ function App() {
     return resolvedAttachments;
   };
 
-  const submitReviewRequest = async (submission: ReviewSubmission) => {
+  const submitReviewRequest = async (submission: ReviewSubmission): Promise<ReviewSubmissionResult> => {
     const title = submission.title.trim();
     const requesterName = submission.requesterName.trim();
     const serviceName = submission.serviceName.trim();
-    if (!title || !requesterName) return false;
-    if (submission.logFiles.length === 0) return false;
+    if (!title || !requesterName) {
+      return { ok: false, errorMessage: '요청 제목과 요청자명을 입력하세요.' };
+    }
+    if (submission.logFiles.length === 0) {
+      return { ok: false, errorMessage: '최소 1개의 로그 파일을 첨부하세요.' };
+    }
 
     const fileSummaries = submission.logFiles.map((entry) => ({
       fileName: entry.file.name,
@@ -748,6 +1083,16 @@ function App() {
     });
 
     if (isSupabaseConfigured && sessionUser) {
+      let effectiveWebhookUrls = googleChatWebhookUrls.map((url) => url.trim()).filter(Boolean);
+
+      if (effectiveWebhookUrls.length === 0) {
+        try {
+          effectiveWebhookUrls = await loadGoogleChatWebhookUrls();
+        } catch (error) {
+          console.error('Failed to load Google Chat webhook URLs:', error);
+        }
+      }
+
       const requestId = crypto.randomUUID();
       const requestRow = {
         id: requestId,
@@ -762,7 +1107,7 @@ function App() {
       const { error: requestError } = await supabase.from('lr_review_requests').insert(requestRow);
       if (requestError) {
         console.error('Review request save failed:', requestError.message);
-        return false;
+        return { ok: false, errorMessage: `검토 요청 저장 실패: ${requestError.message}` };
       }
 
       const uploadedFiles: Array<{
@@ -799,7 +1144,33 @@ function App() {
         const { error: attachmentError } = await supabase.from('lr_review_attachments').insert(uploadedFiles);
         if (attachmentError) {
           console.error('Attachment metadata save failed:', attachmentError.message);
+          return { ok: false, errorMessage: `첨부 메타데이터 저장 실패: ${attachmentError.message}` };
         }
+      }
+
+      const webhookDeliveryResults = await Promise.all(
+        effectiveWebhookUrls.map((webhookUrl) =>
+          sendGoogleChatWebhook(webhookUrl, {
+            text: [
+              '검토 요청이 등록되었습니다.',
+              `제목: ${title}`,
+              `요청자: ${requesterName}`,
+              `서비스명: ${serviceName || '-'}`,
+              `첨부 파일: ${uploadedFiles.length}개`,
+              ...uploadedFiles.map((file) => `- ${file.file_name}`),
+            ].join('\n'),
+          }),
+        ),
+      );
+
+      const webhookSent = effectiveWebhookUrls.length === 0 ? false : webhookDeliveryResults.some(Boolean);
+
+      if (effectiveWebhookUrls.length === 0) {
+        console.warn('No Google Chat webhook URLs are configured.');
+      } else if (!webhookSent) {
+        console.warn('Google Chat webhook delivery failed for every configured URL.');
+      } else if (webhookDeliveryResults.some((result) => !result)) {
+        console.warn('Google Chat webhook delivery failed for one or more configured URLs.');
       }
 
       const newRequest: ReviewRequest = {
@@ -819,7 +1190,7 @@ function App() {
       setSelectedRequestId(requestId);
       setReviewGuideText('');
       setActiveView('review-result');
-      return true;
+      return { ok: true };
     }
 
     const newRequest: ReviewRequest = {
@@ -839,7 +1210,7 @@ function App() {
     setSelectedRequestId(newRequest.id);
     setReviewGuideText('');
     setActiveView('review-result');
-    return true;
+    return { ok: true };
   };
 
   const startReview = async (requestId: string) => {
@@ -862,16 +1233,16 @@ function App() {
     }, 180);
 
     try {
-      if (isOpenAIConfigured) {
+      const openAISettings = { apiKey: openAIApiKeyInput, model: openAIModel };
+
+      if (isOpenAIConfigured(openAISettings)) {
         const attachments = await loadAttachmentPreviews(request.file_summaries ?? []);
         const guide = await generateReviewGuide({
-          title: request.title,
-          requesterName: request.requester_name,
           serviceName: request.service_name,
           logFileCount: request.log_file_count,
           promptText: activeReviewPromptText,
           attachments,
-        });
+        }, openAISettings);
         setReviewGuideText(guide);
       } else {
         setReviewGuideText('');
@@ -898,33 +1269,15 @@ function App() {
     const trimmed = reviewText.trim();
     if (!trimmed) return;
 
-    const completedAt = new Date().toLocaleString('ko-KR');
-    const resultId = `review-${Date.now()}`;
-    const resultEntry = {
-      id: resultId,
-      requestId: selectedRequest.id,
-      requestName: selectedRequest.requester_name,
-      serviceName: selectedRequest.service_name || '',
-      requestCreatedAt: selectedRequest.request_created_at
-        ? new Date(selectedRequest.request_created_at).toLocaleString('ko-KR')
-        : new Date(selectedRequest.created_at).toLocaleString('ko-KR'),
-      reviewerName: sessionUser?.name ?? '미지정',
-      completedAt,
-      resultText: trimmed,
-    };
-
-    setRequests((current) =>
-      current.map((item) => (item.id === selectedRequest.id ? { ...item, status: 'done' } : item)),
-    );
+    const completedAt = formatKoreaDateTime(new Date());
+    const resultId = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `${Date.now()}`;
     setReviewGuideText('');
-    setReviewResults((current) => {
-      const next = [resultEntry, ...current.filter((item) => item.id !== resultId)];
-      return next;
-    });
 
     if (isSupabaseConfigured && sessionUser) {
       void (async () => {
-        const { error } = await supabase.from('lr_review_results').insert({
+        const { error: resultError } = await supabase.from('lr_review_results').insert({
           id: resultId,
           request_id: selectedRequest.id,
           reviewer_id: sessionUser.id,
@@ -933,12 +1286,57 @@ function App() {
           recommendation: null,
         });
 
-        if (error) {
-          console.error('Review result save failed:', error.message);
+        if (resultError) {
+          console.error('Review result save failed:', resultError.message);
+          showSaveNotice('error', '검토 결과 저장 실패');
+          return;
         }
+
+        const { error: logError } = await supabase.from('lr_review_logs').insert({
+          request_id: selectedRequest.id,
+          actor_id: sessionUser.id,
+          action: 'review_completed',
+          details: {
+            id: resultId,
+            result_id: resultId,
+            summary: trimmed,
+            service_name: selectedRequest.service_name || '',
+            requester_name: selectedRequest.requester_name,
+          },
+        });
+
+        if (logError) {
+          console.error('Review log save failed:', logError.message);
+          showSaveNotice('error', '결과 로그 저장 실패');
+          return;
+        }
+
+        const { error: requestError } = await supabase
+          .from('lr_review_requests')
+          .update({
+            status: 'done',
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', selectedRequest.id);
+
+        if (requestError) {
+          console.error('Review request status update failed:', requestError.message);
+          showSaveNotice('error', '검토 상태 저장 실패');
+          return;
+        }
+
+        setRequests((current) =>
+          current.map((item) => (item.id === selectedRequest.id ? { ...item, status: 'done' } : item)),
+        );
+        await loadReviewResults();
+        showSaveNotice('success', '저장 성공');
       })();
       return;
     }
+
+    setRequests((current) =>
+      current.map((item) => (item.id === selectedRequest.id ? { ...item, status: 'done' } : item)),
+    );
   };
 
   const login = async () => {
@@ -982,6 +1380,8 @@ function App() {
     setSelectedReviewPromptIndex(0);
     setReviewPromptLoaded(false);
     setMembersLoaded(false);
+    setGoogleChatWebhookInput('');
+    setGoogleChatWebhookUrls([]);
     setServiceNames([]);
     setAuthError(null);
   };
@@ -1000,7 +1400,7 @@ function App() {
   const pageDescription = {
     dashboard: '업로드된 로그 파일과 검토 상태를 요약해서 보여줍니다.',
     'review-write': '검토 요청자가 로그 파일과 문제 상황을 입력하면 분석 작업이 시작됩니다.',
-    'review-result': '',
+    'review-result': '선택한 검토 요청의 AI 안내를 확인하고 검토 결과를 작성합니다.',
     'result-log': '검토 과정에서 발생한 상태 변경과 기록을 추적합니다.',
     permissions: '등록된 회원의 권한을 설정하고 서비스명을 관리합니다.',
   }[activeView];
@@ -1020,6 +1420,9 @@ function App() {
           );
           if (error) {
             console.error('Failed to save service name:', error.message);
+            showSaveNotice('error', '저장 실패');
+          } else {
+            showSaveNotice('success', '저장 성공');
           }
         })();
       }
@@ -1037,6 +1440,9 @@ function App() {
           const { error } = await supabase.from('lr_service_names').delete().eq('name', name);
           if (error) {
             console.error('Failed to delete service name:', error.message);
+            showSaveNotice('error', '저장 실패');
+          } else {
+            showSaveNotice('success', '저장 성공');
           }
         })();
       }
@@ -1046,7 +1452,14 @@ function App() {
   };
 
   const updateMemberRole = (memberId: string, role: UserRole) => {
+    const previousRole =
+      members.find((member) => member.id === memberId)?.role ??
+      (memberId === sessionUser?.id ? currentProfileRole : 'requester');
+
     setMembers((current) => current.map((member) => (member.id === memberId ? { ...member, role } : member)));
+    if (sessionUser?.id === memberId) {
+      setCurrentProfileRole(role);
+    }
 
     if (!isSupabaseConfigured || !sessionUser) {
       return;
@@ -1063,21 +1476,29 @@ function App() {
 
       if (error) {
         console.error('Failed to update member role:', error.message);
+        setMembers((current) =>
+          current.map((member) => (member.id === memberId ? { ...member, role: previousRole } : member)),
+        );
+        if (sessionUser?.id === memberId) {
+          setCurrentProfileRole(previousRole);
+        }
+        showSaveNotice('error', '저장 실패');
+      } else {
+        showSaveNotice('success', '저장 성공');
       }
     })();
   };
 
   const updateMemberUnitName = (memberId: string, unitName: string) => {
     const trimmed = unitName.trim();
-    setMembers((current) =>
-      current.map((member) => (member.id === memberId ? { ...member, unitName: trimmed } : member)),
-    );
-
-    if (sessionUser?.id === memberId) {
-      setCurrentUserUnitName(trimmed);
-    }
 
     if (!isSupabaseConfigured || !sessionUser) {
+      setMembers((current) =>
+        current.map((member) => (member.id === memberId ? { ...member, unitName: trimmed } : member)),
+      );
+      if (sessionUser?.id === memberId) {
+        setCurrentUserUnitName(trimmed);
+      }
       return;
     }
 
@@ -1092,8 +1513,91 @@ function App() {
 
       if (error) {
         console.error('Failed to update member unit name:', error.message);
+        showSaveNotice('error', '저장 실패');
+        return;
       }
+
+      setMembers((current) =>
+        current.map((member) => (member.id === memberId ? { ...member, unitName: trimmed } : member)),
+      );
+
+      if (sessionUser?.id === memberId) {
+        setCurrentUserUnitName(trimmed);
+      }
+
+      showSaveNotice('success', '저장 성공');
     })();
+  };
+
+  const removeSelectedRequests = async () => {
+    if (currentUserRole !== 'admin' || selectedRequestIds.length === 0) return;
+
+    const requestIds = [...selectedRequestIds];
+    const previousRequests = requests;
+    const previousResults = reviewResults;
+    const remainingRequests = requests.filter((request) => !requestIds.includes(request.id));
+    const remainingResults = reviewResults.filter((result) => !requestIds.includes(result.requestId));
+
+    setRequests(remainingRequests);
+    setReviewResults(remainingResults);
+    setSelectedRequestIds([]);
+    if (selectedRequestId && requestIds.includes(selectedRequestId)) {
+      setSelectedRequestId(remainingRequests[0]?.id ?? null);
+    }
+
+    if (!isSupabaseConfigured || !sessionUser) {
+      showSaveNotice('success', '저장 성공');
+      return;
+    }
+
+    const storagePaths = previousRequests
+      .filter((request) => requestIds.includes(request.id))
+      .flatMap(
+        (request) =>
+          request.file_summaries?.map((file) => file.storagePath).filter((path): path is string => Boolean(path)) ?? [],
+      );
+
+    const { error } = await supabase.from('lr_review_requests').delete().in('id', requestIds);
+    if (error) {
+      console.error('Failed to delete review requests:', error.message);
+      setRequests(previousRequests);
+      setReviewResults(previousResults);
+      showSaveNotice('error', '삭제 실패');
+      return;
+    }
+
+    if (storagePaths.length > 0) {
+      const { error: storageError } = await supabase.storage.from(reviewUploadBucket).remove(storagePaths);
+      if (storageError) {
+        console.error('Failed to delete review attachments from storage:', storageError.message);
+      }
+    }
+
+    showSaveNotice('success', '저장 성공');
+  };
+
+  const removeSelectedResults = async () => {
+    if (currentUserRole !== 'admin' || selectedResultIds.length === 0) return;
+
+    const resultIds = [...selectedResultIds];
+    const previousResults = reviewResults;
+    setReviewResults((current) => current.filter((result) => !resultIds.includes(result.id)));
+    setSelectedResultIds([]);
+
+    if (!isSupabaseConfigured || !sessionUser) {
+      showSaveNotice('success', '저장 성공');
+      return;
+    }
+
+    const { error } = await supabase.from('lr_review_results').delete().in('id', resultIds);
+    if (error) {
+      console.error('Failed to delete review results:', error.message);
+      setReviewResults(previousResults);
+      showSaveNotice('error', '삭제 실패');
+      return;
+    }
+
+    showSaveNotice('success', '저장 성공');
   };
 
   const isAuthenticated = Boolean(sessionUser);
@@ -1119,7 +1623,7 @@ function App() {
         </div>
 
         <nav className="nav">
-          {isAuthenticated && availableNavItems.map((item) => (
+          {isAuthenticated && isRoleResolved && availableNavItems.map((item) => (
             <button
               key={item.id}
               className={`nav-item ${activeView === item.id ? 'active' : ''}`}
@@ -1135,11 +1639,6 @@ function App() {
                 <span className="nav-label-row">
                   <span className="nav-label text-14">
                     {item.label}
-                    {item.id === 'review-result' && pendingRequestCount > 0 && (
-                      <span className="count-badge text-xxs" aria-label={`검토 요청 ${pendingRequestCount}건`}>
-                        {pendingRequestCount}
-                      </span>
-                    )}
                   </span>
                 </span>
                 <small className="text-12">{item.description}</small>
@@ -1159,9 +1658,13 @@ function App() {
       <main className="content">
         <header className="topbar">
           <div className="topbar-title">
-            <h1 className="text-16">{isAuthenticated ? pageTitle : '로그인 필요'}</h1>
+            <h1 className="text-16">{isAuthenticated ? (isRoleResolved ? pageTitle : '권한 확인 중') : '로그인 필요'}</h1>
             <p className="text-14">
-              {isAuthenticated ? pageDescription : '로그인 후 로그 검토 요청, 결과, 설정 화면을 확인할 수 있습니다.'}
+              {isAuthenticated
+                ? isRoleResolved
+                  ? pageDescription
+                  : '권한을 확인한 뒤 접근 가능한 메뉴를 한 번에 표시합니다.'
+                : '로그인 후 로그 검토 요청, 결과, 설정 화면을 확인할 수 있습니다.'}
             </p>
           </div>
           <div className="topbar-actions">
@@ -1182,6 +1685,7 @@ function App() {
         </header>
 
         {isAuthenticated ? (
+          isRoleResolved ? (
           <>
             <div className="hero-banner">
               <div className="hero-row">
@@ -1217,9 +1721,30 @@ function App() {
                 onSelectRequest={setSelectedRequestId}
                 onStartReview={startReview}
                 onCompleteReview={completeReview}
+                currentUserRole={currentUserRole}
+                selectedRequestIds={selectedRequestIds}
+                onToggleRequestSelection={(requestId, checked) =>
+                  setSelectedRequestIds((current) =>
+                    checked ? Array.from(new Set([...current, requestId])) : current.filter((id) => id !== requestId),
+                  )
+                }
+                onRemoveSelectedRequests={() => void removeSelectedRequests()}
               />
             )}
-            {activeView === 'result-log' && <ResultLogView results={reviewResults} />}
+            {activeView === 'result-log' && (
+              <ResultLogView
+                results={reviewResults}
+                requests={requests}
+                currentUserRole={currentUserRole}
+                selectedResultIds={selectedResultIds}
+                onToggleResultSelection={(resultId, checked) =>
+                  setSelectedResultIds((current) =>
+                    checked ? Array.from(new Set([...current, resultId])) : current.filter((id) => id !== resultId),
+                  )
+                }
+                onRemoveSelectedResults={() => void removeSelectedResults()}
+              />
+            )}
             {activeView === 'permissions' && (
               <PermissionsView
                 members={members}
@@ -1227,7 +1752,36 @@ function App() {
                 currentUserName={sessionUser?.name ?? '미로그인'}
                 currentUserEmail={sessionUser?.email ?? ''}
                 currentUserUnitName={currentUserUnitName}
+                googleChatWebhookInput={googleChatWebhookInput}
+                googleChatWebhookUrls={googleChatWebhookUrls}
+                openAIApiKeyInput={openAIApiKeyInput}
                 onChangeCurrentUserUnitName={setCurrentUserUnitName}
+                onChangeGoogleChatWebhookInput={setGoogleChatWebhookInput}
+                onChangeOpenAIApiKeyInput={setOpenAIApiKeyInput}
+                onAddGoogleChatWebhookUrl={() => void persistGoogleChatWebhookUrl(googleChatWebhookInput)}
+                onSaveOpenAISettings={() => void saveOpenAISettings()}
+                onRemoveGoogleChatWebhookUrl={(url) => {
+                  if (currentUserRole !== 'admin' || !isSupabaseConfigured || !sessionUser) {
+                    showSaveNotice('error', '저장 실패');
+                    return;
+                  }
+
+                  void (async () => {
+      const { error } = await supabase.from(googleChatWebhookTable).delete().eq('url', url);
+      if (error) {
+        console.error('Failed to delete Google Chat webhook URL:', error.message);
+        showSaveNotice('error', '저장 실패');
+        return;
+      }
+
+      setGoogleChatWebhookUrls((current) => {
+        const next = current.filter((item) => item !== url);
+        googleChatWebhookUrlsSnapshotRef.current = next;
+        return next;
+      });
+                    showSaveNotice('success', '저장 성공');
+                  })();
+                }}
                 reviewPromptSlots={reviewPromptSlots}
                 editingReviewPromptIndex={editingReviewPromptIndex}
                 selectedReviewPromptIndex={selectedReviewPromptIndex}
@@ -1251,6 +1805,15 @@ function App() {
               />
             )}
           </>
+          ) : (
+            <div className="hero-banner">
+              <div className="hero-row">
+                <span className="text-14">권한 확인</span>
+                <strong className="text-14">메뉴와 접근 권한을 불러오는 중입니다.</strong>
+              </div>
+              <p className="text-14">권한 확인이 끝나면 메뉴를 한 번에 표시합니다.</p>
+            </div>
+          )
         ) : (
           <section className="workspace">
             <article className="detail-card auth-gate">
@@ -1268,6 +1831,19 @@ function App() {
           </section>
         )}
       </main>
+      {saveNotice && (
+        <div className="save-notice-overlay" role="presentation" onClick={() => setSaveNotice(null)}>
+          <div
+            className={`save-notice-card ${saveNotice.kind}`}
+            role="dialog"
+            aria-live="polite"
+            aria-modal="true"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <strong className="text-14">{saveNotice.message}</strong>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1281,7 +1857,7 @@ function Dashboard({ stats, recent }: { stats: { total: number; submitted: numbe
   ];
 
   return (
-    <section className="workspace">
+    <section className="workspace review-result-workspace">
       <article className="detail-card dense-card">
         <div className="detail-header compact">
           <div>
@@ -1306,7 +1882,7 @@ function Dashboard({ stats, recent }: { stats: { total: number; submitted: numbe
         </div>
       </article>
 
-      <article className="detail-card">
+      <article className="detail-card permissions-card">
         <div className="table-header split">
           <h3 className="text-14">Recent requests</h3>
           <span className="text-12">{recent.length} items</span>
@@ -1314,17 +1890,17 @@ function Dashboard({ stats, recent }: { stats: { total: number; submitted: numbe
         <div className="table-card dense-table">
           <div className="table">
             <div className="table-row table-head recent-head">
-              <span className="text-14">Title</span>
-              <span className="text-14">Requester</span>
-              <span className="text-14">Status</span>
-              <span className="text-14">Created</span>
+              <span className="text-13">Title</span>
+              <span className="text-13">Requester</span>
+              <span className="text-13">Status</span>
+              <span className="text-13">Created</span>
             </div>
             {recent.map((item) => (
               <div className="table-row" key={item.id}>
                 <span className="text-12 table-cell-center">{item.title}</span>
                 <span className="text-12 table-cell-center">{item.requester_name}</span>
                 <span className={`pill ${item.status} text-12 table-cell-center`}>{item.status}</span>
-                <span className="text-12 table-cell-center">{new Date(item.created_at).toLocaleDateString('ko-KR')}</span>
+                <span className="text-12 table-cell-center">{formatKoreaDateTime(item.created_at)}</span>
               </div>
             ))}
             {recent.length === 0 && <div className="empty-state">아직 요청이 없습니다.</div>}
@@ -1341,20 +1917,15 @@ function ReviewWriteView({
   serviceNames,
   currentRequesterName,
 }: {
-  onSubmitRequest: (submission: ReviewSubmission) => Promise<boolean>;
+  onSubmitRequest: (submission: ReviewSubmission) => Promise<ReviewSubmissionResult>;
   serviceNames: string[];
   currentRequesterName: string;
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [logFiles, setLogFiles] = useState<ReviewUploadFile[]>([]);
   const [requestTitle, setRequestTitle] = useState('');
-  const [requesterName, setRequesterName] = useState(currentRequesterName);
   const [serviceName, setServiceName] = useState(serviceNames[0] ?? '');
   const [requestError, setRequestError] = useState('');
-
-  useEffect(() => {
-    setRequesterName(currentRequesterName);
-  }, [currentRequesterName]);
 
   useEffect(() => {
     if (serviceNames.length === 0) {
@@ -1405,30 +1976,36 @@ function ReviewWriteView({
     fileInputRef.current?.click();
   };
 
+  const canSubmitRequest =
+    requestTitle.trim().length > 0 &&
+    currentRequesterName.trim().length > 0 &&
+    serviceName.trim().length > 0 &&
+    logFiles.length > 0;
+
   const submitRequest = async () => {
     const title = requestTitle.trim();
-    const requester = requesterName.trim();
-    if (!title || !requester || logFiles.length === 0) {
-      setRequestError('요청 제목, 요청자, 로그 파일을 모두 입력하세요.');
+    const requester = currentRequesterName.trim();
+    if (!title || !requester || !serviceName || logFiles.length === 0) {
+      setRequestError('요청 제목, 요청자, 서비스명, 로그 파일을 모두 입력하세요.');
       return;
     }
 
-    const saved = await onSubmitRequest({
+    const result = await onSubmitRequest({
       title: requestTitle,
-      requesterName,
+      requesterName: currentRequesterName,
       serviceName,
       logFiles,
     });
-    if (saved) {
+    if (result.ok) {
       setRequestError('');
     } else {
-      setRequestError('검토 요청을 저장하지 못했습니다. 입력값과 파일 업로드를 확인하세요.');
+      setRequestError(result.errorMessage ?? '검토 요청을 저장하지 못했습니다.');
     }
   };
 
   return (
     <section className="workspace">
-      <article className="detail-card">
+      <article className="detail-card review-queue-card">
         <div className="detail-header compact">
           <div>
             <h2 className="text-14">로그 검토 요청</h2>
@@ -1458,10 +2035,10 @@ function ReviewWriteView({
           <div className="request-row">
             <div className="request-label">
               <strong className="text-14">요청자</strong>
-              <span className="text-12">담당자 이름 또는 부서를 입력합니다</span>
+              <span className="text-12">로그인한 사용자 이름이 자동으로 들어갑니다</span>
             </div>
             <div className="request-value">
-              <input className="text-12" value={requesterName} onChange={(event) => setRequesterName(event.target.value)} placeholder="이름 / 부서" />
+              <input className="text-12" value={currentRequesterName} readOnly disabled placeholder="로그인 사용자 이름" />
             </div>
           </div>
 
@@ -1540,7 +2117,7 @@ function ReviewWriteView({
           <div className="request-submit-row">
             <div className="request-label request-submit-spacer" aria-hidden="true" />
             <div className="request-actions request-submit-actions">
-              <button className="primary-btn text-12" type="button" onClick={() => void submitRequest()}>
+              <button className="primary-btn text-12" type="button" onClick={() => void submitRequest()} disabled={!canSubmitRequest}>
                 <span className="text-12">검토 요청</span>
               </button>
             </div>
@@ -1593,9 +2170,13 @@ function ReviewResultView({
   reviewGuideProgress,
   reviewGuideError,
   currentUserName,
+  currentUserRole,
+  selectedRequestIds,
   onSelectRequest,
   onStartReview,
   onCompleteReview,
+  onToggleRequestSelection,
+  onRemoveSelectedRequests,
 }: {
   requests: ReviewRequest[];
   selectedRequestId: string | null;
@@ -1604,11 +2185,16 @@ function ReviewResultView({
   reviewGuideProgress: number;
   reviewGuideError: string | null;
   currentUserName: string;
+  currentUserRole: UserRole;
+  selectedRequestIds: string[];
   onSelectRequest: (requestId: string | null) => void;
   onStartReview: (requestId: string) => Promise<void>;
   onCompleteReview: (reviewText: string) => void;
+  onToggleRequestSelection: (requestId: string, checked: boolean) => void;
+  onRemoveSelectedRequests: () => void;
 }) {
   const [reviewResultText, setReviewResultText] = useState('');
+  const reviewResultEditorRef = useRef<HTMLDivElement | null>(null);
   const selectedRequest = requests.find((request) => request.id === selectedRequestId) ?? null;
   const parsedReviewGuideRows = useMemo(
     () => (reviewGuideText ? parseReviewGuideTable(reviewGuideText) : null),
@@ -1620,6 +2206,12 @@ function ReviewResultView({
   }, [selectedRequestId]);
 
   useEffect(() => {
+    if (!reviewResultEditorRef.current) return;
+    if (reviewResultEditorRef.current.innerText === reviewResultText) return;
+    reviewResultEditorRef.current.innerText = reviewResultText;
+  }, [reviewResultText]);
+
+  useEffect(() => {
     if (requests.length === 0) {
       return;
     }
@@ -1628,7 +2220,7 @@ function ReviewResultView({
     if (!selectedRequestId || !selectedExists) {
       const latestRequest = requests[0];
       if (latestRequest) {
-        // Keep the review screen usable without exposing a manual request list.
+        // Keep the review screen focused on the latest request while still allowing selection.
         onSelectRequest(latestRequest.id);
       }
     }
@@ -1639,11 +2231,26 @@ function ReviewResultView({
     void onStartReview(selectedRequest.id);
   };
 
+  const handleSelectRequest = (requestId: string) => {
+    onSelectRequest(requestId);
+    void onStartReview(requestId);
+  };
+
   const handleCompleteReview = () => {
     const trimmed = reviewResultText.trim();
     if (!trimmed) return;
     onCompleteReview(trimmed);
     setReviewResultText('');
+  };
+
+  const handleReviewEditorInput = (event: React.FormEvent<HTMLDivElement>) => {
+    setReviewResultText(event.currentTarget.innerText.replace(/\u00a0/g, ' '));
+  };
+
+  const handleReviewEditorPaste = (event: React.ClipboardEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const text = event.clipboardData.getData('text/plain');
+    document.execCommand('insertText', false, text);
   };
 
   return (
@@ -1656,6 +2263,65 @@ function ReviewResultView({
               <span className="status-dot" />
               <span className="text-12">최신 신청 건을 자동으로 바탕으로 요약합니다</span>
             </div>
+          </div>
+        </div>
+        <div className="table-card dense-table request-queue-table">
+          <div className="table">
+            <div className="table-row table-head result-entry-head">
+              <span className="text-14">선택</span>
+              <span className="text-14">번호</span>
+              <span className="text-14">서비스명</span>
+              <span className="text-14">요청 제목</span>
+              <span className="text-14">요청자</span>
+              <span className="text-14">요청일</span>
+              <span className="text-14">로그파일</span>
+              <span className="text-14">상태</span>
+            </div>
+            {requests.length === 0 ? (
+              <div className="empty-state">아직 검토 요청이 없습니다.</div>
+            ) : (
+              requests.slice(0, 6).map((request, index) => (
+                <div
+                  key={request.id}
+                  className={`table-row result-entry-row request-queue-row ${request.id === selectedRequestId ? 'active' : ''}`}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => handleSelectRequest(request.id)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      handleSelectRequest(request.id);
+                    }
+                  }}
+                >
+                  <span className="text-12">
+                    {currentUserRole === 'admin' ? (
+                      <input
+                        aria-label={`${request.title} 선택`}
+                        className="row-selector"
+                        type="checkbox"
+                        checked={selectedRequestIds.includes(request.id)}
+                        onChange={(event) => onToggleRequestSelection(request.id, event.target.checked)}
+                        onClick={(event) => event.stopPropagation()}
+                        onKeyDown={(event) => event.stopPropagation()}
+                      />
+                    ) : (
+                      '-'
+                    )}
+                  </span>
+                  <span className="text-12">{index + 1}</span>
+                  <span className="text-12">{request.service_name || '-'}</span>
+                  <span className="text-12">{request.title}</span>
+                  <span className="text-12">{request.requester_name}</span>
+                  <span className="text-12">{formatKoreaDateTime(request.request_created_at || request.created_at)}</span>
+                  <span className="text-12">{request.log_file_count}</span>
+                  <span className={`text-12 queue-status ${request.status}`}>
+                    <span className="queue-status-dot" aria-hidden="true" />
+                    <span>{request.status === 'done' ? '완료' : request.status === 'in_review' ? '진행' : '대기'}</span>
+                  </span>
+                </div>
+              ))
+            )}
           </div>
         </div>
         <div className="review-guide-card">
@@ -1712,12 +2378,6 @@ function ReviewResultView({
         <div className="detail-header compact">
           <div>
             <h2 className="text-14">검토 결과 작성</h2>
-            <div className="meta-line">
-              <span className="status-dot" />
-              <span className="text-12">
-                {selectedRequest ? selectedRequest.requester_name : '검토할 신청 건이 없습니다'}
-              </span>
-            </div>
           </div>
         </div>
         <div className="table-card dense-table result-entry-table">
@@ -1726,22 +2386,49 @@ function ReviewResultView({
               <span className="text-14">항목</span>
               <span className="text-14">내용</span>
             </div>
+            <div className="table-row result-entry-row">
+              <span className="text-12 result-entry-label-cell">서비스명</span>
+              <span className="text-12 result-entry-value result-entry-readonly">
+                {selectedRequest?.service_name || '-'}
+              </span>
+            </div>
             <div className="table-row result-entry-row result-entry-text-row">
               <span className="text-12 result-entry-label-cell">검토 결과</span>
-              <textarea
-                className="text-12 result-entry-value"
-                rows={7}
-                placeholder="검토 결과를 입력하세요."
-                value={reviewResultText}
-                onChange={(event) => setReviewResultText(event.target.value)}
-              />
+              <div className="result-entry-editor-shell">
+                <div className="result-entry-editor-toolbar">
+                  <span className="text-12">텍스트 에디터</span>
+                  <button
+                    className="secondary-btn text-12 result-entry-editor-clear"
+                    type="button"
+                    onClick={() => setReviewResultText('')}
+                  >
+                    <span className="text-12">지우기</span>
+                  </button>
+                </div>
+                <div
+                  ref={reviewResultEditorRef}
+                  className={`text-12 result-entry-value result-entry-editor ${reviewResultText ? '' : 'is-empty'}`}
+                  contentEditable
+                  suppressContentEditableWarning
+                  data-placeholder="검토 결과를 입력하세요."
+                  onInput={handleReviewEditorInput}
+                  onPaste={handleReviewEditorPaste}
+                />
+              </div>
             </div>
           </div>
         </div>
         <div className="request-actions">
-          <button className="primary-btn text-12" type="button" onClick={handleStartReview} disabled={!selectedRequest || reviewGuideLoading}>
-            <span className="text-12">{reviewGuideLoading ? '검토 중...' : '검토'}</span>
-          </button>
+          {currentUserRole === 'admin' && (
+            <button
+              className="secondary-btn text-12"
+              type="button"
+              onClick={onRemoveSelectedRequests}
+              disabled={selectedRequestIds.length === 0}
+            >
+              <span className="text-12">선택 삭제</span>
+            </button>
+          )}
           <button className="primary-btn text-12" type="button" onClick={handleCompleteReview} disabled={!selectedRequest}>
             <span className="text-12">검토 완료</span>
           </button>
@@ -1751,7 +2438,167 @@ function ReviewResultView({
   );
 }
 
-function ResultLogView({ results }: { results: ReviewResultEntry[] }) {
+function ResultLogView({
+  results,
+  requests,
+  currentUserRole,
+  selectedResultIds,
+  onToggleResultSelection,
+  onRemoveSelectedResults,
+}: {
+  results: ReviewResultEntry[];
+  requests: ReviewRequest[];
+  currentUserRole: UserRole;
+  selectedResultIds: string[];
+  onToggleResultSelection: (resultId: string, checked: boolean) => void;
+  onRemoveSelectedResults: () => void;
+}) {
+  const requestNumberById = useMemo(
+    () => new Map(requests.map((request, index) => [request.id, index + 1])),
+    [requests],
+  );
+  const csvRows = useMemo(
+    () =>
+      results.map((result) => ({
+        number: requestNumberById.get(result.requestId) ?? '-',
+        requestCreatedAt: result.requestCreatedAt || '-',
+        completedAt: result.completedAt,
+        serviceName: result.serviceName || '-',
+        requesterName: result.requesterName || '-',
+        reviewerName: result.reviewerName,
+        resultText: result.resultText,
+      })),
+    [requestNumberById, results],
+  );
+
+  const handlePrintPdf = () => {
+    const printWindow = window.open('', '_blank', 'noopener,noreferrer,width=1200,height=900');
+    if (!printWindow) return;
+
+    const rowsHtml = csvRows
+      .map(
+        (row) => `
+          <tr>
+            <td>${row.number}</td>
+            <td>${row.requestCreatedAt}</td>
+            <td>${row.completedAt}</td>
+            <td>${row.serviceName}</td>
+            <td>${row.requesterName}</td>
+            <td>${row.reviewerName}</td>
+            <td>${String(row.resultText)
+              .split(/\r?\n/)
+              .map((line) => line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'))
+              .join('<br />')}</td>
+          </tr>
+        `,
+      )
+      .join('');
+
+    printWindow.document.write(`
+      <!doctype html>
+      <html lang="ko">
+        <head>
+          <meta charset="utf-8" />
+          <title>Result Log PDF</title>
+          <style>
+            body {
+              margin: 24px;
+              font-family: 'Korpub돋움체', 'KorPub Dotum', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
+              color: #172033;
+            }
+            h1 {
+              margin: 0 0 16px;
+              font-size: 20px;
+            }
+            table {
+              width: 100%;
+              border-collapse: collapse;
+              table-layout: fixed;
+            }
+            th, td {
+              border: 1px solid #d8dee8;
+              padding: 10px 12px;
+              vertical-align: top;
+              font-size: 12px;
+            }
+            th {
+              background: #f5f7fb;
+              text-align: center;
+              white-space: nowrap;
+            }
+            td {
+              text-align: center;
+              white-space: nowrap;
+            }
+            td:last-child {
+              text-align: left;
+              white-space: pre-wrap;
+              word-break: break-word;
+            }
+          </style>
+        </head>
+        <body>
+          <h1>결과 로그</h1>
+          <table>
+            <thead>
+              <tr>
+                <th>번호</th>
+                <th>검토 요청일</th>
+                <th>검토 완료일</th>
+                <th>서비스</th>
+                <th>요청자</th>
+                <th>검토자</th>
+                <th>검토 결과</th>
+              </tr>
+            </thead>
+            <tbody>${rowsHtml}</tbody>
+          </table>
+        </body>
+      </html>
+    `);
+    printWindow.document.close();
+    printWindow.focus();
+    window.setTimeout(() => {
+      printWindow.print();
+    }, 250);
+  };
+
+  const handleExportCsv = () => {
+    const header = ['번호', '검토 요청일', '검토 완료일', '서비스', '요청자', '검토자', '검토 결과'];
+    const escapeCell = (value: string | number) => `"${String(value).replace(/"/g, '""')}"`;
+    const lines = [
+      header.map(escapeCell).join(','),
+      ...csvRows.map((row) =>
+        [
+          row.number,
+          row.requestCreatedAt,
+          row.completedAt,
+          row.serviceName,
+          row.requesterName,
+          row.reviewerName,
+          row.resultText,
+        ]
+          .map(escapeCell)
+          .join(','),
+      ),
+    ];
+
+    const csvContent = `\uFEFF${lines.join('\n')}`;
+    const encoded = `data:text/csv;charset=utf-8,${encodeURIComponent(csvContent)}`;
+    const link = document.createElement('a');
+    const fileName = `result-log-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.href = encoded;
+    link.setAttribute('download', fileName);
+    link.download = fileName;
+    link.rel = 'noopener';
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+    window.setTimeout(() => {
+      link.remove();
+    }, 1000);
+  };
+
   return (
     <section className="workspace">
       <article className="detail-card wide-card">
@@ -1765,31 +2612,171 @@ function ResultLogView({ results }: { results: ReviewResultEntry[] }) {
           </div>
         </div>
         <div className="table-card dense-table">
-          <div className="table">
-            <div className="table-row table-head result-log-head">
-              <span className="text-14">검토 요청일</span>
-              <span className="text-14">검토 완료일</span>
-              <span className="text-14">서비스</span>
-              <span className="text-14">요청자</span>
-              <span className="text-14">검토자</span>
-              <span className="text-14">검토 결과</span>
+          {results.length === 0 ? (
+            <div className="empty-state">아직 결과 로그가 없습니다.</div>
+          ) : (
+            <div className="result-log-table-wrap">
+              <div className="result-log-actions">
+                <button className="secondary-btn text-12" type="button" onClick={handleExportCsv}>
+                  <span className="text-12">CSV 내보내기</span>
+                </button>
+                <button className="primary-btn text-12" type="button" onClick={handlePrintPdf}>
+                  <span className="text-12">PDF 출력</span>
+                </button>
+                {currentUserRole === 'admin' && (
+                  <button
+                    className="secondary-btn text-12 result-log-delete-btn"
+                    type="button"
+                    onClick={onRemoveSelectedResults}
+                    disabled={selectedResultIds.length === 0}
+                  >
+                    <span className="text-12">선택 삭제</span>
+                  </button>
+                )}
+              </div>
+              <table className="result-log-table">
+                <thead>
+                  <tr>
+                    {currentUserRole === 'admin' && <th className="text-14 result-log-select-col">선택</th>}
+                    <th className="text-14">번호</th>
+                    <th className="text-14">검토 요청일</th>
+                    <th className="text-14">검토 완료일</th>
+                    <th className="text-14">서비스</th>
+                    <th className="text-14">요청자</th>
+                    <th className="text-14">검토자</th>
+                    <th className="text-14">검토 결과</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {results.map((result) => (
+                    <tr key={result.id}>
+                      {currentUserRole === 'admin' && (
+                        <td className="text-12 result-log-id-cell result-log-select-col">
+                          <input
+                            aria-label={`${result.requestId} 결과 선택`}
+                            className="row-selector"
+                            type="checkbox"
+                            checked={selectedResultIds.includes(result.id)}
+                            onChange={(event) => onToggleResultSelection(result.id, event.target.checked)}
+                          />
+                        </td>
+                      )}
+                      <td className="text-12 result-log-id-cell">{requestNumberById.get(result.requestId) ?? '-'}</td>
+                      <td className="text-12">{result.requestCreatedAt || '-'}</td>
+                      <td className="text-12">{result.completedAt}</td>
+                      <td className="text-12">{result.serviceName || '-'}</td>
+                      <td className="text-12">{result.requesterName || '-'}</td>
+                      <td className="text-12">{result.reviewerName}</td>
+                      <td className="text-12 result-log-summary">
+                        {result.resultText.split(/\r?\n/).map((line, index) => (
+                          <Fragment key={`${result.id}-${index}`}>
+                            {index > 0 && <br />}
+                            {line}
+                          </Fragment>
+                        ))}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
-            {results.length === 0 ? (
-              <div className="empty-state">아직 결과 로그가 없습니다.</div>
-            ) : (
-              results.map((result) => (
-                <div className="table-row result-log-row" key={result.id}>
-                  <span className="text-12">{result.requestCreatedAt || '-'}</span>
-                  <span className="text-12">{result.completedAt}</span>
-                  <span className="text-12">{result.serviceName || '-'}</span>
-                  <span className="text-12">{result.requestName}</span>
-                  <span className="text-12">{result.reviewerName}</span>
-                  <span className="text-12 result-log-summary">{result.resultText}</span>
-                </div>
-              ))
-            )}
+          )}
+        </div>
+      </article>
+    </section>
+  );
+}
+
+function ReportView({ results, requests }: { results: ReviewResultEntry[]; requests: ReviewRequest[] }) {
+  const requestNumberById = useMemo(
+    () => new Map(requests.map((request, index) => [request.id, index + 1])),
+    [requests],
+  );
+  const generatedAt = useMemo(() => formatKoreaDateTime(new Date()), []);
+
+  return (
+    <section className="workspace report-workspace">
+      <article className="detail-card wide-card report-screen-controls">
+        <div className="detail-header compact">
+          <div>
+            <h2 className="text-14">리포트 출력</h2>
+            <div className="meta-line">
+              <span className="status-dot" />
+              <span className="text-12">브라우저 인쇄에서 PDF로 저장할 수 있습니다</span>
+            </div>
           </div>
         </div>
+        <div className="request-actions">
+          <button className="primary-btn text-12" type="button" onClick={() => window.print()}>
+            <span className="text-12">PDF 출력</span>
+          </button>
+        </div>
+      </article>
+
+      <article className="detail-card wide-card report-print-area">
+        <div className="report-header">
+          <div>
+            <div className="report-kicker text-12">LOG REVIEW REPORT</div>
+            <h2 className="text-16">검토 결과 리포트</h2>
+          </div>
+          <div className="report-meta">
+            <div className="text-12">생성일시</div>
+            <strong className="text-14">{generatedAt}</strong>
+          </div>
+        </div>
+
+        <div className="report-summary-grid">
+          <div className="report-summary-card">
+            <span className="text-12">총 결과 수</span>
+            <strong className="text-16">{results.length}</strong>
+          </div>
+          <div className="report-summary-card">
+            <span className="text-12">총 요청 수</span>
+            <strong className="text-16">{requests.length}</strong>
+          </div>
+        </div>
+
+        {results.length === 0 ? (
+          <div className="empty-state">출력할 결과 로그가 없습니다.</div>
+        ) : (
+          <div className="report-list">
+            {results.map((result) => (
+              <section className="report-item" key={result.id}>
+                <div className="report-item-head">
+                  <div className="report-item-title-group">
+                    <span className="report-item-number text-12">
+                      요청 #{requestNumberById.get(result.requestId) ?? '-'}
+                    </span>
+                    <strong className="text-14">{result.serviceName || '-'}</strong>
+                  </div>
+                  <span className="text-12">{result.completedAt}</span>
+                </div>
+                <div className="report-detail-grid">
+                  <div className="report-detail-row">
+                    <span className="text-12">검토 요청일</span>
+                    <strong className="text-12">{result.requestCreatedAt || '-'}</strong>
+                  </div>
+                  <div className="report-detail-row">
+                    <span className="text-12">요청자</span>
+                    <strong className="text-12">{result.requesterName || '-'}</strong>
+                  </div>
+                  <div className="report-detail-row">
+                    <span className="text-12">검토자</span>
+                    <strong className="text-12">{result.reviewerName}</strong>
+                  </div>
+                </div>
+                <div className="report-result-box">
+                  {result.resultText.split(/\r?\n/).map((line, index) => (
+                    <Fragment key={`${result.id}-report-${index}`}>
+                      {index > 0 && <br />}
+                      {line}
+                    </Fragment>
+                  ))}
+                </div>
+              </section>
+            ))}
+          </div>
+        )}
       </article>
     </section>
   );
@@ -1801,7 +2788,15 @@ function PermissionsView({
   currentUserName,
   currentUserEmail,
   currentUserUnitName,
+  googleChatWebhookInput,
+  googleChatWebhookUrls,
+  openAIApiKeyInput,
   onChangeCurrentUserUnitName,
+  onChangeGoogleChatWebhookInput,
+  onChangeOpenAIApiKeyInput,
+  onAddGoogleChatWebhookUrl,
+  onSaveOpenAISettings,
+  onRemoveGoogleChatWebhookUrl,
   reviewPromptSlots,
   editingReviewPromptIndex,
   selectedReviewPromptIndex,
@@ -1820,7 +2815,15 @@ function PermissionsView({
   currentUserName: string;
   currentUserEmail: string;
   currentUserUnitName: string;
+  googleChatWebhookInput: string;
+  googleChatWebhookUrls: string[];
+  openAIApiKeyInput: string;
   onChangeCurrentUserUnitName: (value: string) => void;
+  onChangeGoogleChatWebhookInput: (value: string) => void;
+  onChangeOpenAIApiKeyInput: (value: string) => void;
+  onAddGoogleChatWebhookUrl: () => void;
+  onSaveOpenAISettings: () => void;
+  onRemoveGoogleChatWebhookUrl: (value: string) => void;
   reviewPromptSlots: string[];
   editingReviewPromptIndex: number;
   selectedReviewPromptIndex: number;
@@ -1835,173 +2838,304 @@ function PermissionsView({
   onResetReviewPrompt: () => void;
 }) {
   const [serviceInput, setServiceInput] = useState('');
+  const [selectedSection, setSelectedSection] = useState<PermissionSectionId>('members');
+  const [memberUnitDrafts, setMemberUnitDrafts] = useState<Record<string, string>>({});
   const promptTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const memberUnitSaveTimersRef = useRef<Record<string, number>>({});
   const selectedPrompt = reviewPromptSlots[editingReviewPromptIndex] ?? defaultReviewPrompt;
 
   useEffect(() => {
-    if (currentUserRole === 'requester') return;
+    if (currentUserRole !== 'admin') return;
     promptTextareaRef.current?.focus();
   }, [currentUserRole, editingReviewPromptIndex]);
+
+  useEffect(() => {
+    setMemberUnitDrafts((current) => {
+      const next = { ...current };
+      for (const member of members) {
+        if (next[member.id] === undefined || next[member.id] === member.unitName) {
+          next[member.id] = member.unitName || '';
+        }
+      }
+      return next;
+    });
+  }, [members]);
+
+  useEffect(() => {
+    return () => {
+      Object.values(memberUnitSaveTimersRef.current).forEach((timer) => window.clearTimeout(timer));
+      memberUnitSaveTimersRef.current = {};
+    };
+  }, []);
+
+  const handleMemberUnitDraftChange = (memberId: string, value: string) => {
+    setMemberUnitDrafts((current) => ({ ...current, [memberId]: value }));
+
+    const existingTimer = memberUnitSaveTimersRef.current[memberId];
+    if (existingTimer) {
+      window.clearTimeout(existingTimer);
+    }
+
+    memberUnitSaveTimersRef.current[memberId] = window.setTimeout(() => {
+      delete memberUnitSaveTimersRef.current[memberId];
+      onUpdateMemberUnitName(memberId, value);
+    }, 2000);
+  };
 
   const submitService = () => {
     onAddServiceName(serviceInput);
     setServiceInput('');
   };
 
+  const sectionItems: Array<{ id: PermissionSectionId; label: string; description: string }> = [
+    { id: 'members', label: '회원 관리', description: '등록된 사용자와 권한을 확인합니다' },
+    { id: 'webhook', label: '웹훅 관리', description: 'Google Chat 알림 URL을 저장합니다' },
+    { id: 'prompts', label: '프롬프트 관리', description: '검토용 AI 프롬프트를 편집합니다' },
+    { id: 'openai', label: 'OpenAI 설정', description: '검토용 API 키를 저장합니다' },
+    { id: 'services', label: '서비스명 관리', description: '서비스명을 등록하고 삭제합니다' },
+  ];
+
   return (
     <section className="workspace">
-      <article className="detail-card">
-        <div className="detail-header compact">
-          <div>
-            <h2 className="text-14">설정</h2>
-            <div className="meta-line">
-              <span className="status-dot" />
-              <span className="text-12">권한 관리</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="permission-note text-12">
-          현재 로그인 권한: {roleLabel[currentUserRole]}
-        </div>
-
-        <div className="account-card">
-          <div className="account-copy">
-            <div className="account-label text-12">현재 로그인 계정</div>
-            <div className="account-name text-14">
-              {currentUserEmail ? `${currentUserName} (${currentUserEmail})` : currentUserName}
-            </div>
-            {!currentUserEmail && <div className="account-warning text-12">이 계정은 이메일 정보가 없습니다.</div>}
-          </div>
-        </div>
-
-        <div className="table-card dense-table member-table">
-          <div className="table">
-            <div className="table-row table-head member-head">
-              <span className="text-14">회원명</span>
-              <span className="text-14">유닛명</span>
-              <span className="text-14">이메일</span>
-              <span className="text-14">권한</span>
-              <span className="text-14">접근 메뉴</span>
-            </div>
-            {members.map((member) => (
-              <div className="table-row member-row" key={member.id}>
-                <span className="text-12">{member.name}</span>
-                <span>
-                  <input
-                    className="text-12 member-unit-input"
-                    value={member.unitName || ''}
-                    onChange={(event) => onUpdateMemberUnitName(member.id, event.target.value)}
-                    placeholder="유닛명 입력"
-                    disabled={currentUserRole !== 'admin'}
-                  />
-                </span>
-                <span className="text-12">{member.email}</span>
-                <span>
-                  <select
-                    className="text-12"
-                    value={member.role}
-                    onChange={(event) => onUpdateMemberRole(member.id, event.target.value as UserRole)}
-                    disabled={currentUserRole !== 'admin'}
-                  >
-                    <option value="requester">요청자</option>
-                    <option value="reviewer">검토자</option>
-                    <option value="admin">관리자</option>
-                  </select>
-                </span>
-                <span className="text-12">
-                  {member.role === 'requester' && '검토 작성'}
-                  {member.role === 'reviewer' && '대시보드, 검토 작성, 검토 결과, 결과 로그'}
-                  {member.role === 'admin' && '전체 메뉴'}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="prompt-card">
-          <div className="prompt-card-header">
-            <div>
-              <div className="account-label text-12">프롬프트 등록</div>
-              <div className="prompt-card-title text-14">AI 검토 요청에 사용할 기본 프롬프트를 저장합니다</div>
-            </div>
-          </div>
-          <div className="prompt-toolbar">
-            {reviewPromptSlots.map((_prompt, index) => (
+      <article className="detail-card permissions-card">
+        <div className="permissions-layout">
+          <aside className="permissions-menu" aria-label="권한 관리 섹션">
+            {sectionItems.map((section) => (
               <button
-                key={`prompt-slot-${index + 1}`}
-                className={`prompt-slot ${selectedReviewPromptIndex === index ? 'selected' : ''} ${
-                  editingReviewPromptIndex === index ? 'editing' : ''
-                }`}
+                key={section.id}
                 type="button"
-                onClick={() => onSelectPromptForEditing(index)}
-                disabled={currentUserRole === 'requester'}
-                aria-pressed={selectedReviewPromptIndex === index}
-                aria-label={`프롬프트 ${index + 1} 선택`}
+                className={`permissions-menu-item ${selectedSection === section.id ? 'active' : ''}`}
+                onClick={() => setSelectedSection(section.id)}
               >
-                <span className="prompt-slot-label text-14">{index + 1}</span>
+                <span className="permissions-menu-label text-14">{section.label}</span>
+                <small className="text-12">{section.description}</small>
               </button>
             ))}
-            <button
-              className="secondary-btn text-12 prompt-select-btn"
-              type="button"
-              onClick={() => onSelectReviewPromptSlot(editingReviewPromptIndex)}
-              disabled={currentUserRole === 'requester'}
-            >
-              <span className="text-12">선택</span>
-            </button>
-            <button className="secondary-btn text-12 prompt-default-btn" type="button" onClick={onResetReviewPrompt} disabled={currentUserRole === 'requester'}>
-              <span className="text-12">기본값</span>
-            </button>
-          </div>
-          <textarea
-            ref={promptTextareaRef}
-            className="text-12 prompt-textarea"
-            value={selectedPrompt}
-            onChange={(event) => onChangeReviewPrompt(event.target.value)}
-            placeholder="검토 프롬프트를 입력하세요."
-            rows={12}
-            disabled={currentUserRole === 'requester'}
-          />
-          <div className="prompt-card-note text-12">
-            {currentUserRole === 'requester'
-              ? '요청자는 프롬프트를 수정할 수 없습니다.'
-              : '선택한 프롬프트는 자동 저장되며 [검토] 버튼을 눌렀을 때 OpenAI 요청에 반영됩니다.'}
-          </div>
-        </div>
-      </article>
+          </aside>
 
-      <article className="detail-card">
-        <div className="table-header split">
-          <h3 className="text-14">서비스명 관리</h3>
-          <span className="text-12">{serviceNames.length} items</span>
-        </div>
-        <div className="service-manager">
-            <div className="service-add">
-              <input
-                className="text-12"
-                value={serviceInput}
-                placeholder="서비스명 추가"
-                onChange={(event) => setServiceInput(event.target.value)}
-                disabled={currentUserRole !== 'admin'}
-              />
-            <button className="primary-btn text-12" type="button" onClick={submitService} disabled={currentUserRole !== 'admin'}>
-              <span className="text-12">추가</span>
-            </button>
-          </div>
+          <div className="permissions-panel">
+            {selectedSection === 'members' && (
+              <div className="table-card dense-table member-table">
+                <div className="table">
+                  <div className="table-row table-head member-head">
+                    <span className="text-14">회원명</span>
+                    <span className="text-14">이메일</span>
+                    <span className="text-14">유닛명</span>
+                    <span className="text-14">권한</span>
+                    <span className="text-14">접근 메뉴</span>
+                  </div>
+                  {members.map((member) => (
+                    <div className="table-row member-row" key={member.id}>
+                      <span className="text-12">{member.name}</span>
+                      <span className="text-12">{member.email}</span>
+                      <span>
+                        <input
+                          className="text-12 member-unit-input"
+                          value={memberUnitDrafts[member.id] ?? member.unitName ?? ''}
+                          onChange={(event) => handleMemberUnitDraftChange(member.id, event.target.value)}
+                          placeholder="유닛명 입력"
+                          disabled={currentUserRole !== 'admin'}
+                        />
+                      </span>
+                      <span>
+                        <select
+                          className="text-12 member-role-select"
+                          value={member.role}
+                          onChange={(event) => onUpdateMemberRole(member.id, event.target.value as UserRole)}
+                          disabled={currentUserRole !== 'admin'}
+                        >
+                          <option value="requester">requester</option>
+                          <option value="reviewer">reviewer</option>
+                          <option value="admin">admin</option>
+                          </select>
+                        </span>
+                      <span className="text-12">
+                        {member.role === 'requester' && 'dashboard, review-write'}
+                        {member.role === 'reviewer' && 'dashboard, review-write, review-result, result-log, report'}
+                        {member.role === 'admin' && 'dashboard, review-write, review-result, result-log, report, permissions'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
-          <div className="service-list">
-            {serviceNames.length === 0 ? (
-              <div className="empty-state">등록된 서비스명이 없습니다.</div>
-            ) : (
-              serviceNames.map((serviceName) => (
-                <div className="service-item" key={serviceName}>
-                  <span className="text-14">{serviceName}</span>
-                  <button className="secondary-btn text-12" type="button" onClick={() => onRemoveServiceName(serviceName)} disabled={currentUserRole !== 'admin'}>
-                    <span className="text-12">삭제</span>
+            {selectedSection === 'webhook' && (
+              <div className="prompt-card">
+                <div className="prompt-card-header">
+                  <div>
+                    <div className="account-label text-12">Google Chat 웹훅</div>
+                    <div className="prompt-card-title text-14">검토 요청이 등록될 때 알림을 보낼 웹훅 URL을 여러 개 저장합니다</div>
+                  </div>
+                </div>
+                <div className="webhook-input-row">
+                  <input
+                    className="text-12 webhook-input"
+                    value={googleChatWebhookInput}
+                    onChange={(event) => onChangeGoogleChatWebhookInput(event.target.value)}
+                    placeholder="https://chat.googleapis.com/v1/spaces/..."
+                    disabled={currentUserRole === 'requester'}
+                  />
+                  <button
+                    className="primary-btn text-12 webhook-save-btn"
+                    type="button"
+                    onClick={onAddGoogleChatWebhookUrl}
+                    disabled={currentUserRole === 'requester' || !googleChatWebhookInput.trim()}
+                  >
+                    <span className="text-12">저장</span>
                   </button>
                 </div>
-              ))
+                <div className="webhook-list">
+                  {googleChatWebhookUrls.length === 0 ? (
+                    <div className="prompt-card-note text-12">저장된 웹훅이 없습니다.</div>
+                  ) : (
+                    googleChatWebhookUrls.map((url) => (
+                      <div className="webhook-item" key={url}>
+                        <span className="text-12 webhook-url">{url}</span>
+                        <button
+                          className="secondary-btn text-12"
+                          type="button"
+                          onClick={() => onRemoveGoogleChatWebhookUrl(url)}
+                          disabled={currentUserRole === 'requester'}
+                        >
+                          삭제
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+                <div className="prompt-card-note text-12">
+                  {currentUserRole === 'requester'
+                    ? '요청자는 웹훅을 수정할 수 없습니다.'
+                    : '저장된 값은 Supabase에 보관되고, 검토 요청이 등록될 때 모두 사용됩니다.'}
+                </div>
+              </div>
+            )}
+
+            {selectedSection === 'prompts' && (
+              <div className="prompt-card">
+                <div className="prompt-card-header">
+                  <div>
+                    <div className="account-label text-12">프롬프트 등록</div>
+                    <div className="prompt-card-title text-14">AI 검토 요청에 사용할 기본 프롬프트를 저장합니다</div>
+                  </div>
+                </div>
+                <div className="prompt-toolbar">
+                  {reviewPromptSlots.map((_prompt, index) => (
+                    <button
+                      key={`prompt-slot-${index + 1}`}
+                      className={`prompt-slot ${selectedReviewPromptIndex === index ? 'selected' : ''} ${
+                        editingReviewPromptIndex === index ? 'editing' : ''
+                      }`}
+                      type="button"
+                      onClick={() => onSelectPromptForEditing(index)}
+                      disabled={currentUserRole !== 'admin'}
+                      aria-pressed={selectedReviewPromptIndex === index}
+                      aria-label={`프롬프트 ${index + 1} 선택`}
+                    >
+                      <span className="prompt-slot-label text-14">{index + 1}</span>
+                    </button>
+                  ))}
+                  <button
+                    className="secondary-btn text-12 prompt-select-btn"
+                    type="button"
+                    onClick={() => onSelectReviewPromptSlot(editingReviewPromptIndex)}
+                    disabled={currentUserRole !== 'admin'}
+                  >
+                    <span className="text-12">선택</span>
+                  </button>
+                  <button className="secondary-btn text-12 prompt-default-btn" type="button" onClick={onResetReviewPrompt} disabled={currentUserRole !== 'admin'}>
+                    <span className="text-12">기본값</span>
+                  </button>
+                </div>
+                <textarea
+                  ref={promptTextareaRef}
+                  className="text-12 prompt-textarea"
+                  value={selectedPrompt}
+                  onChange={(event) => onChangeReviewPrompt(event.target.value)}
+                  placeholder="검토 프롬프트를 입력하세요."
+                  rows={18}
+                  disabled={currentUserRole !== 'admin'}
+                />
+                <div className="prompt-card-note text-12">
+                  {currentUserRole === 'admin'
+                    ? '선택한 프롬프트는 자동 저장되며 [검토] 버튼을 눌렀을 때 OpenAI 요청에 반영됩니다.'
+                    : '프롬프트는 admin만 수정할 수 있습니다.'}
+                </div>
+              </div>
+            )}
+
+            {selectedSection === 'services' && (
+              <div className="prompt-card">
+                <div className="table-header split">
+                  <h3 className="text-14">서비스명 관리</h3>
+                  <span className="text-12">{serviceNames.length} items</span>
+                </div>
+                <div className="service-manager">
+                  <div className="service-add">
+                    <input
+                      className="text-12"
+                      value={serviceInput}
+                      placeholder="서비스명 추가"
+                      onChange={(event) => setServiceInput(event.target.value)}
+                      disabled={currentUserRole !== 'admin'}
+                    />
+                    <button className="primary-btn text-12" type="button" onClick={submitService} disabled={currentUserRole !== 'admin'}>
+                      <span className="text-12">추가</span>
+                    </button>
+                  </div>
+
+                  <div className="service-list">
+                    {serviceNames.length === 0 ? (
+                      <div className="empty-state">등록된 서비스명이 없습니다.</div>
+                    ) : (
+                      serviceNames.map((serviceName) => (
+                        <div className="service-item" key={serviceName}>
+                          <span className="text-14">{serviceName}</span>
+                          <button className="secondary-btn text-12" type="button" onClick={() => onRemoveServiceName(serviceName)} disabled={currentUserRole !== 'admin'}>
+                            <span className="text-12">삭제</span>
+                          </button>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {selectedSection === 'openai' && (
+              <div className="prompt-card">
+                <div className="prompt-card-header">
+                  <div>
+                    <div className="account-label text-12">OpenAI API Key</div>
+                    <div className="prompt-card-title text-14">Secrets 대신 설정 메뉴에서 검토용 OpenAI 키를 관리합니다</div>
+                  </div>
+                </div>
+                <div className="webhook-input-row">
+                  <input
+                    className="text-12 webhook-input"
+                    type="password"
+                    value={openAIApiKeyInput}
+                    onChange={(event) => onChangeOpenAIApiKeyInput(event.target.value)}
+                    placeholder="sk-..."
+                    disabled={currentUserRole !== 'admin'}
+                    autoComplete="off"
+                  />
+                  <button
+                    className="primary-btn text-12 webhook-save-btn"
+                    type="button"
+                    onClick={onSaveOpenAISettings}
+                    disabled={currentUserRole !== 'admin'}
+                  >
+                    <span className="text-12">저장</span>
+                  </button>
+                </div>
+                <div className="prompt-card-note text-12">
+                  {currentUserRole === 'admin'
+                    ? '저장된 키는 AI 검토 안내 생성에 바로 사용됩니다.'
+                    : 'OpenAI 키는 admin만 수정할 수 있습니다.'}
+                </div>
+              </div>
             )}
           </div>
         </div>
