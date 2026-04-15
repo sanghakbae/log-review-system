@@ -214,6 +214,43 @@ const formatKoreaDate = (value?: string | Date | null) => {
   }).format(date);
 };
 
+const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+const splitWebhookMessage = (messageLines: string[], maxChars = 3000) => {
+  const chunks: string[] = [];
+  let current = '';
+
+  const pushChunk = () => {
+    if (current.trim()) {
+      chunks.push(current.trim());
+      current = '';
+    }
+  };
+
+  for (const line of messageLines) {
+    const normalizedLine = line ?? '';
+
+    if (normalizedLine.length > maxChars) {
+      pushChunk();
+      for (let index = 0; index < normalizedLine.length; index += maxChars) {
+        chunks.push(normalizedLine.slice(index, index + maxChars));
+      }
+      continue;
+    }
+
+    const next = current ? `${current}\n${normalizedLine}` : normalizedLine;
+    if (next.length > maxChars) {
+      pushChunk();
+      current = normalizedLine;
+    } else {
+      current = next;
+    }
+  }
+
+  pushChunk();
+  return chunks;
+};
+
 const formatKoreaDateInputValue = (value?: string | Date | null) => {
   if (!value) return '';
 
@@ -538,18 +575,40 @@ function App() {
       return;
     }
 
+    const messageChunks = splitWebhookMessage(messageLines);
     const webhookDeliveryResults = await Promise.all(
-      effectiveWebhookUrls.map((webhookUrl) =>
-        sendGoogleChatWebhook(webhookUrl, {
-          text: messageLines.join('\n'),
-        }),
-      ),
+      effectiveWebhookUrls.map(async (webhookUrl) => {
+        let allSucceeded = true;
+
+        for (const [index, chunk] of messageChunks.entries()) {
+          const chunkPrefix =
+            messageChunks.length > 1 ? `[${index + 1}/${messageChunks.length}]\n` : '';
+          const success = await sendGoogleChatWebhook(webhookUrl, {
+            text: `${chunkPrefix}${chunk}`,
+          });
+
+          if (!success) {
+            allSucceeded = false;
+            break;
+          }
+
+          if (index < messageChunks.length - 1) {
+            await sleep(1100);
+          }
+        }
+
+        return allSucceeded;
+      }),
     );
 
     if (!webhookDeliveryResults.some(Boolean)) {
-      console.warn('Google Chat webhook delivery failed for every configured URL.');
+      console.warn('Google Chat webhook delivery failed for every configured URL.', {
+        chunkCount: messageChunks.length,
+      });
     } else if (webhookDeliveryResults.some((result) => !result)) {
-      console.warn('Google Chat webhook delivery failed for one or more configured URLs.');
+      console.warn('Google Chat webhook delivery failed for one or more configured URLs.', {
+        chunkCount: messageChunks.length,
+      });
     }
   };
 
