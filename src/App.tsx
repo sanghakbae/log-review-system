@@ -997,7 +997,7 @@ function App() {
 
       const { data, error } = await supabase
         .from('lr_review_requests')
-        .select('id, title, requester_name, status, created_at, request_body')
+        .select('id, title, requester_name, status, request_created_at, created_at, request_body')
         .order('created_at', { ascending: false });
 
       if (error) {
@@ -1037,7 +1037,7 @@ function App() {
 
       const dbRequests = (data ?? []).map((item) => ({
           ...item,
-          request_created_at: item.created_at,
+          request_created_at: item.request_created_at || item.created_at,
           service_name: parseStoredRequestBody(item.request_body)?.serviceName ?? '',
           log_file_count:
             attachmentCounts.get(item.id) ?? parseStoredRequestBody(item.request_body)?.logFiles?.length ?? 0,
@@ -2431,7 +2431,11 @@ function ReviewResultView({
 }) {
   const [reviewResultText, setReviewResultText] = useState('');
   const reviewResultEditorRef = useRef<HTMLDivElement | null>(null);
-  const selectedRequest = requests.find((request) => request.id === selectedRequestId) ?? null;
+  const activeRequests = useMemo(
+    () => requests.filter((request) => request.status !== 'done'),
+    [requests],
+  );
+  const selectedRequest = activeRequests.find((request) => request.id === selectedRequestId) ?? null;
   const canDeleteRequests = isReviewerOrAbove(currentUserRole);
   const parsedReviewGuideRows = useMemo(
     () => (reviewGuideText ? parseReviewGuideTable(reviewGuideText) : null),
@@ -2449,19 +2453,22 @@ function ReviewResultView({
   }, [reviewResultText]);
 
   useEffect(() => {
-    if (requests.length === 0) {
+    if (activeRequests.length === 0) {
+      if (selectedRequestId) {
+        onSelectRequest(null);
+      }
       return;
     }
 
-    const selectedExists = selectedRequestId ? requests.some((request) => request.id === selectedRequestId) : false;
+    const selectedExists = selectedRequestId ? activeRequests.some((request) => request.id === selectedRequestId) : false;
     if (!selectedRequestId || !selectedExists) {
-      const latestRequest = requests[0];
+      const latestRequest = activeRequests[0];
       if (latestRequest) {
         // Keep the review screen focused on the latest request while still allowing selection.
         onSelectRequest(latestRequest.id);
       }
     }
-  }, [onSelectRequest, requests, selectedRequestId]);
+  }, [activeRequests, onSelectRequest, selectedRequestId]);
 
   const handleStartReview = () => {
     if (!selectedRequest) return;
@@ -2524,10 +2531,10 @@ function ReviewResultView({
               <span className="text-14">로그파일</span>
               <span className="text-14">상태</span>
             </div>
-            {requests.length === 0 ? (
+            {activeRequests.length === 0 ? (
               <div className="empty-state">아직 검토 요청이 없습니다.</div>
             ) : (
-              requests.slice(0, 6).map((request, index) => (
+              activeRequests.slice(0, 6).map((request, index) => (
                 <div
                   key={request.id}
                   className={`table-row result-entry-row request-queue-row ${request.id === selectedRequestId ? 'active' : ''}`}
@@ -2572,7 +2579,7 @@ function ReviewResultView({
                         onKeyDown={(event) => event.stopPropagation()}
                       />
                     ) : (
-                      formatKoreaDateTime(request.request_created_at || request.created_at)
+                      formatKoreaDate(request.request_created_at || request.created_at)
                     )}
                   </span>
                   <span className="text-12">{request.log_file_count}</span>
