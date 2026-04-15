@@ -214,6 +214,15 @@ const formatKoreaDate = (value?: string | Date | null) => {
   }).format(date);
 };
 
+const formatDisplayNameWithUnit = (name?: string | null, unitName?: string | null) => {
+  const trimmedName = name?.trim() ?? '';
+  const trimmedUnitName = unitName?.trim() ?? '';
+
+  if (!trimmedName) return '미지정';
+  if (!trimmedUnitName) return trimmedName;
+  return `${trimmedName}(${trimmedUnitName})`;
+};
+
 const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
 
 const splitWebhookMessage = (messageLines: string[], maxChars = 3000) => {
@@ -1124,9 +1133,12 @@ function App() {
     const dbResults = (data ?? []).map((row) => {
       const request = requestMap.get(row.request_id ?? '') ?? requests.find((item) => item.id === row.request_id);
       const requestDate = request?.request_created_at || request?.created_at;
-      const reviewerName =
-        members.find((member) => member.id === row.reviewer_id)?.name ??
-        (row.reviewer_id === sessionUser.id ? sessionUser.name : '미지정');
+      const reviewer = members.find((member) => member.id === row.reviewer_id);
+      const reviewerName = reviewer
+        ? formatDisplayNameWithUnit(reviewer.name, reviewer.unitName)
+        : row.reviewer_id === sessionUser.id
+          ? formatDisplayNameWithUnit(sessionUser.name, currentUserUnitName)
+          : '미지정';
 
       return {
         id: row.id,
