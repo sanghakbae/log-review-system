@@ -99,6 +99,9 @@ type ReviewGuideRow = {
   action: string;
 };
 
+const isReviewerOrAbove = (role: UserRole) => role === 'reviewer' || role === 'admin';
+const isAdminRole = (role: UserRole) => role === 'admin';
+
 const navItems: Array<{ id: ViewId; label: string; description: string }> = [
   { id: 'dashboard', label: '대시보드', description: '전체 현황' },
   { id: 'review-write', label: '검토 작성', description: '로그 요청' },
@@ -454,6 +457,43 @@ function App() {
   const showSaveNotice = (kind: 'success' | 'error', message: string) => {
     setSaveNotice({ kind, message });
     window.setTimeout(() => setSaveNotice(null), 1800);
+  };
+
+  const loadEffectiveWebhookUrls = async () => {
+    let effectiveWebhookUrls = googleChatWebhookUrls.map((url) => url.trim()).filter(Boolean);
+
+    if (effectiveWebhookUrls.length === 0) {
+      try {
+        effectiveWebhookUrls = await loadGoogleChatWebhookUrls();
+      } catch (error) {
+        console.error('Failed to load Google Chat webhook URLs:', error);
+      }
+    }
+
+    return effectiveWebhookUrls;
+  };
+
+  const sendWebhookNotifications = async (messageLines: string[]) => {
+    const effectiveWebhookUrls = await loadEffectiveWebhookUrls();
+
+    if (effectiveWebhookUrls.length === 0) {
+      console.warn('No Google Chat webhook URLs are configured.');
+      return;
+    }
+
+    const webhookDeliveryResults = await Promise.all(
+      effectiveWebhookUrls.map((webhookUrl) =>
+        sendGoogleChatWebhook(webhookUrl, {
+          text: messageLines.join('\n'),
+        }),
+      ),
+    );
+
+    if (!webhookDeliveryResults.some(Boolean)) {
+      console.warn('Google Chat webhook delivery failed for every configured URL.');
+    } else if (webhookDeliveryResults.some((result) => !result)) {
+      console.warn('Google Chat webhook delivery failed for one or more configured URLs.');
+    }
   };
 
   const persistGoogleChatWebhookUrl = async (webhookUrl: string) => {
@@ -1083,16 +1123,6 @@ function App() {
     });
 
     if (isSupabaseConfigured && sessionUser) {
-      let effectiveWebhookUrls = googleChatWebhookUrls.map((url) => url.trim()).filter(Boolean);
-
-      if (effectiveWebhookUrls.length === 0) {
-        try {
-          effectiveWebhookUrls = await loadGoogleChatWebhookUrls();
-        } catch (error) {
-          console.error('Failed to load Google Chat webhook URLs:', error);
-        }
-      }
-
       const requestId = crypto.randomUUID();
       const requestRow = {
         id: requestId,
@@ -1148,30 +1178,17 @@ function App() {
         }
       }
 
-      const webhookDeliveryResults = await Promise.all(
-        effectiveWebhookUrls.map((webhookUrl) =>
-          sendGoogleChatWebhook(webhookUrl, {
-            text: [
-              '검토 요청이 등록되었습니다.',
-              `제목: ${title}`,
-              `요청자: ${requesterName}`,
-              `서비스명: ${serviceName || '-'}`,
-              `첨부 파일: ${uploadedFiles.length}개`,
-              ...uploadedFiles.map((file) => `- ${file.file_name}`),
-            ].join('\n'),
-          }),
-        ),
-      );
-
-      const webhookSent = effectiveWebhookUrls.length === 0 ? false : webhookDeliveryResults.some(Boolean);
-
-      if (effectiveWebhookUrls.length === 0) {
-        console.warn('No Google Chat webhook URLs are configured.');
-      } else if (!webhookSent) {
-        console.warn('Google Chat webhook delivery failed for every configured URL.');
-      } else if (webhookDeliveryResults.some((result) => !result)) {
-        console.warn('Google Chat webhook delivery failed for one or more configured URLs.');
-      }
+      await sendWebhookNotifications([
+        '검토 요청이 등록되었습니다.',
+        `제목: ${title}`,
+        `요청자: ${requesterName}`,
+        `서비스명: ${serviceName || '-'}`,
+        `요청 시각: ${formatKoreaDateTime(requestRow.request_created_at)}`,
+        `첨부 파일 수: ${uploadedFiles.length}개`,
+        ...(uploadedFiles.length > 0
+          ? ['첨부 파일 목록:', ...uploadedFiles.map((file) => `- ${file.file_name}`)]
+          : ['첨부 파일 목록: -']),
+      ]);
 
       const newRequest: ReviewRequest = {
         id: requestId,
@@ -1324,6 +1341,17 @@ function App() {
           showSaveNotice('error', '검토 상태 저장 실패');
           return;
         }
+
+        await sendWebhookNotifications([
+          '검토가 완료되었습니다.',
+          `제목: ${selectedRequest.title}`,
+          `서비스명: ${selectedRequest.service_name || '-'}`,
+          `요청자: ${selectedRequest.requester_name}`,
+          `검토자: ${sessionUser.name}`,
+          `검토 완료 시각: ${completedAt}`,
+          '검토 결과:',
+          trimmed,
+        ]);
 
         setRequests((current) =>
           current.map((item) => (item.id === selectedRequest.id ? { ...item, status: 'done' } : item)),
@@ -1530,7 +1558,7 @@ function App() {
   };
 
   const removeSelectedRequests = async () => {
-    if (currentUserRole !== 'admin' || selectedRequestIds.length === 0) return;
+    if (!isReviewerOrAbove(currentUserRole) || selectedRequestIds.length === 0) return;
 
     const requestIds = [...selectedRequestIds];
     const previousRequests = requests;
@@ -1557,12 +1585,28 @@ function App() {
           request.file_summaries?.map((file) => file.storagePath).filter((path): path is string => Boolean(path)) ?? [],
       );
 
-    const { error } = await supabase.from('lr_review_requests').delete().in('id', requestIds);
+    const { data: deletedRequests, error } = await supabase
+      .from('lr_review_requests')
+      .delete()
+      .in('id', requestIds)
+      .select('id');
     if (error) {
       console.error('Failed to delete review requests:', error.message);
       setRequests(previousRequests);
       setReviewResults(previousResults);
       showSaveNotice('error', '삭제 실패');
+      return;
+    }
+
+    if ((deletedRequests ?? []).length !== requestIds.length) {
+      console.error('Review request delete affected fewer rows than expected:', {
+        expected: requestIds.length,
+        deleted: (deletedRequests ?? []).length,
+        requestIds,
+      });
+      setRequests(previousRequests);
+      setReviewResults(previousResults);
+      showSaveNotice('error', '삭제 권한이 없거나 삭제가 완료되지 않았습니다.');
       return;
     }
 
@@ -1577,7 +1621,7 @@ function App() {
   };
 
   const removeSelectedResults = async () => {
-    if (currentUserRole !== 'admin' || selectedResultIds.length === 0) return;
+    if (!isAdminRole(currentUserRole) || selectedResultIds.length === 0) return;
 
     const resultIds = [...selectedResultIds];
     const previousResults = reviewResults;
@@ -1589,11 +1633,26 @@ function App() {
       return;
     }
 
-    const { error } = await supabase.from('lr_review_results').delete().in('id', resultIds);
+    const { data: deletedResults, error } = await supabase
+      .from('lr_review_results')
+      .delete()
+      .in('id', resultIds)
+      .select('id');
     if (error) {
       console.error('Failed to delete review results:', error.message);
       setReviewResults(previousResults);
       showSaveNotice('error', '삭제 실패');
+      return;
+    }
+
+    if ((deletedResults ?? []).length !== resultIds.length) {
+      console.error('Review result delete affected fewer rows than expected:', {
+        expected: resultIds.length,
+        deleted: (deletedResults ?? []).length,
+        resultIds,
+      });
+      setReviewResults(previousResults);
+      showSaveNotice('error', '삭제 권한이 없거나 삭제가 완료되지 않았습니다.');
       return;
     }
 
@@ -1699,6 +1758,7 @@ function App() {
             {activeView === 'review-write' && (
               <ReviewWriteView
                 onSubmitRequest={submitReviewRequest}
+                onShowNotice={showSaveNotice}
                 serviceNames={serviceNames}
                 currentRequesterName={
                   sessionUser
@@ -1914,10 +1974,12 @@ function Dashboard({ stats, recent }: { stats: { total: number; submitted: numbe
 
 function ReviewWriteView({
   onSubmitRequest,
+  onShowNotice,
   serviceNames,
   currentRequesterName,
 }: {
   onSubmitRequest: (submission: ReviewSubmission) => Promise<ReviewSubmissionResult>;
+  onShowNotice: (kind: 'success' | 'error', message: string) => void;
   serviceNames: string[];
   currentRequesterName: string;
 }) {
@@ -1998,8 +2060,11 @@ function ReviewWriteView({
     });
     if (result.ok) {
       setRequestError('');
+      onShowNotice('success', '검토 요청이 등록되었습니다.');
     } else {
-      setRequestError(result.errorMessage ?? '검토 요청을 저장하지 못했습니다.');
+      const message = result.errorMessage ?? '검토 요청을 저장하지 못했습니다.';
+      setRequestError(message);
+      onShowNotice('error', message);
     }
   };
 
@@ -2196,6 +2261,7 @@ function ReviewResultView({
   const [reviewResultText, setReviewResultText] = useState('');
   const reviewResultEditorRef = useRef<HTMLDivElement | null>(null);
   const selectedRequest = requests.find((request) => request.id === selectedRequestId) ?? null;
+  const canDeleteRequests = isReviewerOrAbove(currentUserRole);
   const parsedReviewGuideRows = useMemo(
     () => (reviewGuideText ? parseReviewGuideTable(reviewGuideText) : null),
     [reviewGuideText],
@@ -2264,6 +2330,16 @@ function ReviewResultView({
               <span className="text-12">최신 신청 건을 자동으로 바탕으로 요약합니다</span>
             </div>
           </div>
+          {canDeleteRequests && (
+            <button
+              className="secondary-btn text-12 result-log-delete-btn"
+              type="button"
+              onClick={onRemoveSelectedRequests}
+              disabled={selectedRequestIds.length === 0}
+            >
+              <span className="text-12">선택 삭제</span>
+            </button>
+          )}
         </div>
         <div className="table-card dense-table request-queue-table">
           <div className="table">
@@ -2295,7 +2371,7 @@ function ReviewResultView({
                   }}
                 >
                   <span className="text-12">
-                    {currentUserRole === 'admin' ? (
+                    {canDeleteRequests ? (
                       <input
                         aria-label={`${request.title} 선택`}
                         className="row-selector"
@@ -2419,16 +2495,6 @@ function ReviewResultView({
           </div>
         </div>
         <div className="request-actions">
-          {currentUserRole === 'admin' && (
-            <button
-              className="secondary-btn text-12"
-              type="button"
-              onClick={onRemoveSelectedRequests}
-              disabled={selectedRequestIds.length === 0}
-            >
-              <span className="text-12">선택 삭제</span>
-            </button>
-          )}
           <button className="primary-btn text-12" type="button" onClick={handleCompleteReview} disabled={!selectedRequest}>
             <span className="text-12">검토 완료</span>
           </button>
