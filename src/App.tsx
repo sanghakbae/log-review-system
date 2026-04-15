@@ -200,6 +200,63 @@ const formatKoreaDateTime = (value?: string | Date | null) => {
   }).format(date);
 };
 
+const formatKoreaDate = (value?: string | Date | null) => {
+  if (!value) return '-';
+
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return '-';
+
+  return new Intl.DateTimeFormat('ko-KR', {
+    timeZone: 'Asia/Seoul',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(date);
+};
+
+const formatKoreaDateInputValue = (value?: string | Date | null) => {
+  if (!value) return '';
+
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Seoul',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+
+  const year = parts.find((part) => part.type === 'year')?.value;
+  const month = parts.find((part) => part.type === 'month')?.value;
+  const day = parts.find((part) => part.type === 'day')?.value;
+
+  if (!year || !month || !day) return '';
+  return `${year}-${month}-${day}`;
+};
+
+const mergeKoreaDateWithExistingTime = (dateValue: string, existingValue?: string | Date | null) => {
+  if (!dateValue) return null;
+
+  const existingDate = existingValue ? (existingValue instanceof Date ? existingValue : new Date(existingValue)) : null;
+  const parts =
+    existingDate && !Number.isNaN(existingDate.getTime())
+      ? new Intl.DateTimeFormat('en-GB', {
+          timeZone: 'Asia/Seoul',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: false,
+        }).formatToParts(existingDate)
+      : [];
+
+  const hour = parts.find((part) => part.type === 'hour')?.value ?? '00';
+  const minute = parts.find((part) => part.type === 'minute')?.value ?? '00';
+  const second = parts.find((part) => part.type === 'second')?.value ?? '00';
+
+  return `${dateValue}T${hour}:${minute}:${second}+09:00`;
+};
+
 const parseReviewGuideTable = (text: string) => {
   const lines = text
     .replace(/```[\s\S]*?```/g, (match) => match.replace(/```/g, ''))
@@ -1007,6 +1064,7 @@ function App() {
 
     const dbResults = (data ?? []).map((row) => {
       const request = requestMap.get(row.request_id ?? '') ?? requests.find((item) => item.id === row.request_id);
+      const requestDate = request?.request_created_at || request?.created_at;
       const reviewerName =
         members.find((member) => member.id === row.reviewer_id)?.name ??
         (row.reviewer_id === sessionUser.id ? sessionUser.name : '미지정');
@@ -1016,9 +1074,9 @@ function App() {
         requestId: row.request_id ?? '',
         serviceName: request?.service_name ?? '',
         requesterName: request?.requester_name ?? '',
-        requestCreatedAt: formatKoreaDateTime(request?.request_created_at || request?.created_at),
+        requestCreatedAt: formatKoreaDate(requestDate),
         reviewerName,
-        completedAt: formatKoreaDateTime(row.created_at),
+        completedAt: formatKoreaDate(requestDate),
         resultText: row.summary ?? '',
       };
     });
@@ -1659,6 +1717,45 @@ function App() {
     showSaveNotice('success', '저장 성공');
   };
 
+  const updateRequestCreatedAt = async (requestId: string, dateValue: string) => {
+    const request = requests.find((item) => item.id === requestId);
+    if (!request || !dateValue) return;
+
+    const nextRequestCreatedAt = mergeKoreaDateWithExistingTime(
+      dateValue,
+      request.request_created_at || request.created_at,
+    );
+    if (!nextRequestCreatedAt) return;
+
+    const previousRequests = requests;
+    const nextRequests = requests.map((item) =>
+      item.id === requestId ? { ...item, request_created_at: nextRequestCreatedAt } : item,
+    );
+    setRequests(nextRequests);
+
+    if (!isSupabaseConfigured || !sessionUser) {
+      showSaveNotice('success', '저장 성공');
+      return;
+    }
+
+    const { error } = await supabase
+      .from('lr_review_requests')
+      .update({
+        request_created_at: nextRequestCreatedAt,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', requestId);
+
+    if (error) {
+      console.error('Failed to update request date:', error.message);
+      setRequests(previousRequests);
+      showSaveNotice('error', '요청일 저장 실패');
+      return;
+    }
+
+    showSaveNotice('success', '저장 성공');
+  };
+
   const isAuthenticated = Boolean(sessionUser);
 
   return (
@@ -1783,6 +1880,7 @@ function App() {
                 onCompleteReview={completeReview}
                 currentUserRole={currentUserRole}
                 selectedRequestIds={selectedRequestIds}
+                onUpdateRequestCreatedAt={(requestId, dateValue) => void updateRequestCreatedAt(requestId, dateValue)}
                 onToggleRequestSelection={(requestId, checked) =>
                   setSelectedRequestIds((current) =>
                     checked ? Array.from(new Set([...current, requestId])) : current.filter((id) => id !== requestId),
@@ -2240,6 +2338,7 @@ function ReviewResultView({
   onSelectRequest,
   onStartReview,
   onCompleteReview,
+  onUpdateRequestCreatedAt,
   onToggleRequestSelection,
   onRemoveSelectedRequests,
 }: {
@@ -2255,6 +2354,7 @@ function ReviewResultView({
   onSelectRequest: (requestId: string | null) => void;
   onStartReview: (requestId: string) => Promise<void>;
   onCompleteReview: (reviewText: string) => void;
+  onUpdateRequestCreatedAt: (requestId: string, dateValue: string) => void;
   onToggleRequestSelection: (requestId: string, checked: boolean) => void;
   onRemoveSelectedRequests: () => void;
 }) {
@@ -2389,7 +2489,21 @@ function ReviewResultView({
                   <span className="text-12">{request.service_name || '-'}</span>
                   <span className="text-12">{request.title}</span>
                   <span className="text-12">{request.requester_name}</span>
-                  <span className="text-12">{formatKoreaDateTime(request.request_created_at || request.created_at)}</span>
+                  <span className="text-12">
+                    {isAdminRole(currentUserRole) ? (
+                      <input
+                        aria-label={`${request.title} 요청일`}
+                        className="request-date-input text-12"
+                        type="date"
+                        value={formatKoreaDateInputValue(request.request_created_at || request.created_at)}
+                        onChange={(event) => onUpdateRequestCreatedAt(request.id, event.target.value)}
+                        onClick={(event) => event.stopPropagation()}
+                        onKeyDown={(event) => event.stopPropagation()}
+                      />
+                    ) : (
+                      formatKoreaDateTime(request.request_created_at || request.created_at)
+                    )}
+                  </span>
                   <span className="text-12">{request.log_file_count}</span>
                   <span className={`text-12 queue-status ${request.status}`}>
                     <span className="queue-status-dot" aria-hidden="true" />

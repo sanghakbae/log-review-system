@@ -1627,6 +1627,16 @@ button {
   font-size: 12px !important;
 }
 
+.request-date-input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #d8e0ea;
+  border-radius: 8px;
+  padding: 4px 8px;
+  background: #fff;
+  color: #24324a;
+}
+
 .request-queue-row:hover {
   background: rgba(68, 98, 255, 0.05);
 }
