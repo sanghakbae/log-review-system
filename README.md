@@ -23,7 +23,7 @@ React + Vite + Supabase로 만든 로그 검토 시스템입니다.
   - 서비스별 상태와 작업 흐름을 확인하는 시작 화면
 - `검토 작성`
   - 요청 제목, 요청자, 서비스명 입력
-  - `.log`, `.csv`, `.json` 계열 파일 업로드
+  - `.log`, `.csv`, `.json`, `.xlsx` 계열 파일 업로드
   - 업로드 파일의 텍스트 미리보기 사용
 - `검토 결과`
   - OpenAI 응답을 Markdown 표 형태로 표시
@@ -167,7 +167,7 @@ Google OAuth를 사용하려면 Supabase Auth와 Google Cloud Console을 둘 다
 
 ## 개발 메모
 
-- 파일 미리보기는 텍스트, `.log`, `.csv`, `.json` 위주로 처리합니다.
+- 파일 미리보기는 텍스트, `.log`, `.csv`, `.json` 위주로 처리합니다. `.xlsx`는 업로드만 지원합니다.
 - AI 응답은 Markdown 표 하나만 반환하도록 유도합니다.
 - 날짜가 들어간 결과는 달력 기준 요일을 기준으로 검증합니다.
 - 역할별 접근 메뉴는 `requester`, `reviewer`, `admin` 기준으로 분기됩니다.

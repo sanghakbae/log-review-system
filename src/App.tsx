@@ -505,11 +505,12 @@ const getJudgmentTone = (value: string) => {
 
 const sanitizeStorageFileName = (name: string) => name.replace(/[^a-zA-Z0-9._-]+/g, '_');
 
-const allowedLogExtensions = new Set(['log', 'csv', 'json']);
+const allowedLogExtensions = new Set(['log', 'csv', 'json', 'xlsx']);
+const textPreviewExtensions = new Set(['log', 'csv', 'json']);
 
 const shouldPreviewFile = (file: File) => {
   const extension = file.name.split('.').pop()?.toLowerCase() ?? '';
-  return file.type.startsWith('text/') || allowedLogExtensions.has(extension);
+  return file.type.startsWith('text/') || textPreviewExtensions.has(extension);
 };
 
 const buildFilePreview = async (file: File) => {
@@ -2688,7 +2689,7 @@ function ReviewWriteView({
           <div className="request-row">
             <div className="request-label">
               <strong className="text-14">로그 파일</strong>
-              <span className="text-12">.log, .csv, .json 파일만 등록합니다</span>
+              <span className="text-12">.log, .csv, .json, .xlsx 파일만 등록합니다</span>
             </div>
             <div className="request-value file-upload">
               <input
@@ -2696,7 +2697,7 @@ function ReviewWriteView({
                 className="file-input"
                 type="file"
                 multiple
-                accept=".log,.csv,.json"
+                accept=".log,.csv,.json,.xlsx"
                 onChange={(event) => {
                   void addLogFiles(event.target.files);
                   event.target.value = '';
