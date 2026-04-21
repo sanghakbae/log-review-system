@@ -120,6 +120,16 @@ Supabase 초기화와 정책은 `supabase/migrations` 아래의 마이그레이�
 - Storage 버킷 `review-uploads` 사용 가능 여부 확인
 - RLS 정책이 프로필, 요청, 첨부, 결과, 로그 테이블에 적용되었는지 확인
 
+### Google Chat 웹훅 릴레이
+
+브라우저에서 Google Chat 웹훅으로 직접 POST하면 CORS 정책 때문에 실패할 수 있습니다. 운영 환경에서는 Supabase Edge Function 릴레이를 배포합니다.
+
+```bash
+supabase functions deploy google-chat-webhook
+```
+
+앱은 로컬 개발 중에는 Vite dev 서버의 `/api/google-chat-webhook` 릴레이를 먼저 사용하고, 운영 배포에서는 Supabase Edge Function `google-chat-webhook`을 사용합니다.
+
 ### 빠른 확인 쿼리
 
 ```sql

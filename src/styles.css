@@ -276,6 +276,28 @@ button {
     0 14px 24px rgba(23, 32, 51, 0.08);
 }
 
+.nav-item:disabled {
+  cursor: not-allowed;
+  color: rgba(99, 111, 132, 0.64);
+  border-color: rgba(200, 210, 225, 0.34);
+  background: linear-gradient(180deg, rgba(247, 249, 252, 0.76) 0%, rgba(239, 243, 248, 0.76) 100%);
+  box-shadow: none;
+  opacity: 0.72;
+}
+
+.nav-item:disabled:hover {
+  transform: none;
+  border-color: rgba(200, 210, 225, 0.34);
+  background: linear-gradient(180deg, rgba(247, 249, 252, 0.76) 0%, rgba(239, 243, 248, 0.76) 100%);
+  box-shadow: none;
+}
+
+.nav-item:disabled .nav-icon,
+.nav-item:disabled .nav-label,
+.nav-item:disabled small {
+  color: rgba(99, 111, 132, 0.64);
+}
+
 .nav-item span {
   font-size: 14px;
   font-weight: 600;
@@ -700,6 +722,32 @@ button {
   box-shadow: 0 10px 24px rgba(23, 32, 51, 0.06);
   text-align: center;
   justify-items: center;
+  cursor: pointer;
+  transition:
+    transform 140ms ease,
+    box-shadow 140ms ease,
+    border-color 140ms ease;
+}
+
+.stat-chip:hover {
+  transform: translateY(-1px);
+  border-color: rgba(68, 98, 255, 0.28);
+  box-shadow: 0 14px 28px rgba(23, 32, 51, 0.09);
+}
+
+.stat-chip:disabled {
+  cursor: default;
+}
+
+.stat-chip:disabled:hover {
+  transform: none;
+  border-color: var(--line);
+  box-shadow: 0 10px 24px rgba(23, 32, 51, 0.06);
+}
+
+.stat-chip:focus-visible {
+  outline: 2px solid rgba(68, 98, 255, 0.35);
+  outline-offset: 2px;
 }
 
 .summary-chip {
@@ -1033,24 +1081,41 @@ button {
 .webhook-input {
   width: 100%;
   min-height: 36px;
-  padding: 0 14px;
+  padding: 10px 14px;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: #fbfcff;
   color: var(--text);
+  resize: vertical;
 }
 
 .webhook-input-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 72px;
   gap: 8px;
-  align-items: center;
+  align-items: stretch;
+  width: 100%;
+  min-width: 0;
   padding: 0;
 }
 
 .webhook-save-btn {
   min-height: 36px;
   justify-content: center;
+  min-width: 0;
+}
+
+.openai-key-row {
+  grid-template-columns: minmax(0, 1fr) minmax(72px, auto);
+}
+
+.openai-key-row .webhook-input {
+  min-width: 0;
+}
+
+.openai-key-row .webhook-save-btn {
+  width: 100%;
+  max-width: 120px;
 }
 
 .webhook-list {
@@ -1058,6 +1123,11 @@ button {
   gap: 8px;
   margin-top: 0;
   padding: 0;
+}
+
+.webhook-test-row {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .webhook-item {
@@ -1099,6 +1169,7 @@ button {
 }
 
 .file-upload-btn {
+  min-height: 42px;
   min-width: 120px;
   justify-self: start;
 }
@@ -1112,6 +1183,10 @@ button {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.file-list .file-row {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .file-actions .file-icon-btn {
@@ -1546,6 +1621,11 @@ button {
   vertical-align: top;
 }
 
+.result-log-table td {
+  font-size: 14px !important;
+  line-height: 1.55;
+}
+
 .result-log-table th {
   background: #fafbfe;
   text-align: center;
@@ -1852,7 +1932,11 @@ button {
 }
 
 .request-value-service select {
-  font-size: 12px;
+  min-height: 45px;
+  height: 45px;
+  padding: 0 14px;
+  font-size: 13px;
+  line-height: 1.4;
 }
 
 .request-actions {
