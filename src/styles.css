@@ -1599,8 +1599,27 @@ button {
   display: flex;
   justify-content: flex-end;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   margin: 6px 6px 10px 0;
+}
+
+.result-log-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: auto;
+  color: var(--muted);
+}
+
+.result-log-filter select {
+  min-width: 140px;
+  height: 34px;
+  padding: 4px 28px 4px 10px;
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  background: #fff;
+  color: #172033;
 }
 
 .result-log-delete-btn {
@@ -1624,6 +1643,12 @@ button {
 .result-log-table td {
   font-size: 14px !important;
   line-height: 1.55;
+}
+
+.result-log-empty-cell {
+  padding: 18px 12px !important;
+  text-align: center !important;
+  color: var(--muted);
 }
 
 .result-log-table th {

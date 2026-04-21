@@ -3199,11 +3199,23 @@ function ResultLogView({
   onRemoveSelectedResults: () => void;
 }) {
   const [resultPage, setResultPage] = useState(1);
+  const [resultServiceFilter, setResultServiceFilter] = useState('all');
   const resultsPerPage = 15;
-  const resultPageCount = Math.max(1, Math.ceil(results.length / resultsPerPage));
+  const resultServiceOptions = useMemo(
+    () =>
+      Array.from(new Set(results.map((result) => result.serviceName.trim()).filter(Boolean))).sort((first, second) =>
+        first.localeCompare(second, 'ko'),
+      ),
+    [results],
+  );
+  const filteredResults = useMemo(
+    () => (resultServiceFilter === 'all' ? results : results.filter((result) => result.serviceName === resultServiceFilter)),
+    [resultServiceFilter, results],
+  );
+  const resultPageCount = Math.max(1, Math.ceil(filteredResults.length / resultsPerPage));
   const pagedResults = useMemo(
-    () => results.slice((resultPage - 1) * resultsPerPage, resultPage * resultsPerPage),
-    [resultPage, results],
+    () => filteredResults.slice((resultPage - 1) * resultsPerPage, resultPage * resultsPerPage),
+    [filteredResults, resultPage],
   );
 
   useEffect(() => {
@@ -3212,10 +3224,14 @@ function ResultLogView({
     }
   }, [resultPage, resultPageCount]);
 
+  useEffect(() => {
+    setResultPage(1);
+  }, [resultServiceFilter]);
+
   const csvRows = useMemo(
     () =>
-      results.map((result, index) => ({
-        number: results.length - index,
+      filteredResults.map((result, index) => ({
+        number: filteredResults.length - index,
         requestCreatedAt: result.requestCreatedAt || '-',
         completedAt: result.completedAt,
         serviceName: result.serviceName || '-',
@@ -3223,7 +3239,7 @@ function ResultLogView({
         reviewerName: result.reviewerName,
         resultText: result.resultText,
       })),
-    [results],
+    [filteredResults],
   );
 
   const handlePrintPdf = () => {
@@ -3404,6 +3420,21 @@ function ResultLogView({
           ) : (
             <div className="result-log-table-wrap">
               <div className="result-log-actions">
+                <label className="result-log-filter text-12">
+                  <span className="text-12">서비스</span>
+                  <select
+                    className="text-12"
+                    value={resultServiceFilter}
+                    onChange={(event) => setResultServiceFilter(event.target.value)}
+                  >
+                    <option value="all">전체</option>
+                    {resultServiceOptions.map((serviceName) => (
+                      <option key={serviceName} value={serviceName}>
+                        {serviceName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
                 <button className="secondary-btn text-12" type="button" onClick={handleExportCsv}>
                   <span className="text-12">CSV 내보내기</span>
                 </button>
@@ -3435,40 +3466,48 @@ function ResultLogView({
                   </tr>
                 </thead>
                 <tbody>
-                  {pagedResults.map((result, index) => (
-                    <tr key={result.id}>
-                      {currentUserRole === 'admin' && (
-                        <td className="text-12 result-log-id-cell result-log-select-col">
-                          <input
-                            aria-label={`${result.requestId} 결과 선택`}
-                            className="row-selector"
-                            type="checkbox"
-                            checked={selectedResultIds.includes(result.id)}
-                            onChange={(event) => onToggleResultSelection(result.id, event.target.checked)}
-                          />
-                        </td>
-                      )}
-                      <td className="text-12 result-log-id-cell">
-                        {results.length - ((resultPage - 1) * resultsPerPage + index)}
-                      </td>
-                      <td className="text-12">{result.requestCreatedAt || '-'}</td>
-                      <td className="text-12">{result.completedAt}</td>
-                      <td className="text-12">{result.serviceName || '-'}</td>
-                      <td className="text-12">{result.requesterName || '-'}</td>
-                      <td className="text-12">{result.reviewerName}</td>
-                      <td className="text-12 result-log-summary">
-                        {result.resultText.split(/\r?\n/).map((line, index) => (
-                          <Fragment key={`${result.id}-${index}`}>
-                            {index > 0 && <br />}
-                            {line}
-                          </Fragment>
-                        ))}
+                  {filteredResults.length === 0 ? (
+                    <tr>
+                      <td className="text-12 result-log-empty-cell" colSpan={currentUserRole === 'admin' ? 8 : 7}>
+                        선택한 서비스의 결과 로그가 없습니다.
                       </td>
                     </tr>
-                  ))}
+                  ) : (
+                    pagedResults.map((result, index) => (
+                      <tr key={result.id}>
+                        {currentUserRole === 'admin' && (
+                          <td className="text-12 result-log-id-cell result-log-select-col">
+                            <input
+                              aria-label={`${result.requestId} 결과 선택`}
+                              className="row-selector"
+                              type="checkbox"
+                              checked={selectedResultIds.includes(result.id)}
+                              onChange={(event) => onToggleResultSelection(result.id, event.target.checked)}
+                            />
+                          </td>
+                        )}
+                        <td className="text-12 result-log-id-cell">
+                          {filteredResults.length - ((resultPage - 1) * resultsPerPage + index)}
+                        </td>
+                        <td className="text-12">{result.requestCreatedAt || '-'}</td>
+                        <td className="text-12">{result.completedAt}</td>
+                        <td className="text-12">{result.serviceName || '-'}</td>
+                        <td className="text-12">{result.requesterName || '-'}</td>
+                        <td className="text-12">{result.reviewerName}</td>
+                        <td className="text-12 result-log-summary">
+                          {result.resultText.split(/\r?\n/).map((line, index) => (
+                            <Fragment key={`${result.id}-${index}`}>
+                              {index > 0 && <br />}
+                              {line}
+                            </Fragment>
+                          ))}
+                        </td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
-              {results.length > resultsPerPage && (
+              {filteredResults.length > resultsPerPage && (
                 <div className="request-pagination result-log-pagination" aria-label="결과 로그 페이지">
                   {Array.from({ length: resultPageCount }, (_item, index) => {
                     const page = index + 1;
