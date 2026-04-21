@@ -1725,6 +1725,36 @@ button {
   background: rgba(68, 98, 255, 0.08);
 }
 
+.request-pagination {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px 8px 4px;
+}
+
+.request-page-btn {
+  display: inline-grid;
+  place-items: center;
+  min-width: 30px;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.request-page-btn.active {
+  border-color: rgba(68, 98, 255, 0.42);
+  background: rgba(68, 98, 255, 0.1);
+  color: #1b3fb8;
+  font-weight: 800;
+}
+
+.request-page-btn:hover {
+  border-color: rgba(68, 98, 255, 0.28);
+}
+
 .queue-status {
   display: inline-flex;
   align-items: center;

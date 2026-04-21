@@ -69,6 +69,8 @@ const getAttachmentInstruction = (extension: string) => {
       return 'CSV 파일은 컬럼 이름, 반복 행, 이상치, 특정 값의 편중, 집계 가능한 패턴을 우선 확인해줘.';
     case 'json':
       return 'JSON 파일은 중첩 구조, 키별 값 분포, 배열 항목 반복, 오류 객체, 메타데이터 패턴을 우선 확인해줘.';
+    case 'xlsx':
+      return '엑셀 파일은 시트별 헤더, 계정/권한 정보, 액션 로그 행위, 날짜/시간, IP, 세션, 이메일을 교차 확인하고 근거에는 실제 행 값과 컬럼명을 포함해줘.';
     default:
       return '파일 형식에 맞게 핵심 구조와 이상 패턴을 우선 확인해줘.';
   }
@@ -77,7 +79,8 @@ const getAttachmentInstruction = (extension: string) => {
 const formatAttachmentSummary = (attachments: NonNullable<ReviewRequestInput['attachments']>) =>
   attachments
     .map((item, index) => {
-      const preview = item.previewText ? item.previewText.slice(0, 1200) : '내용 미리보기를 추출하지 못했습니다.';
+      const previewLimit = item.extension === 'xlsx' ? 6000 : 1200;
+      const preview = item.previewText ? item.previewText.slice(0, previewLimit) : '내용 미리보기를 추출하지 못했습니다.';
       const instruction = getAttachmentInstruction(item.extension);
       return [
         `${index + 1}. ${item.fileName} (${item.extension || 'unknown'}, ${item.mimeType || 'unknown'}, ${item.size} bytes)`,
@@ -95,6 +98,24 @@ const getDateRuleInstruction = () =>
     '근거 칸에는 날짜 문자열과 함께 확인한 요일을 같이 적어라.',
     '날짜가 불명확하면 주말 여부를 단정하지 말고 "확인 불가" 또는 "-"로 적어라.',
   ].join(' ');
+
+const getServiceSpecificInstruction = (serviceName?: string) => {
+  if (serviceName?.trim() !== '카피킬러') {
+    return '-';
+  }
+
+  return [
+    '카피킬러 서비스는 다음 7개 항목을 반드시 점검하고, 표에 가능한 한 각각 반영한다.',
+    '1. 동일 계정으로 여러 IP에서 접속한 계정: email_address 또는 계정 식별자별 ipaddress distinct 수를 확인한다.',
+    '2. 가장 많이 로그인한 계정: 로그인 관련 act_name 또는 act 기준으로 계정별 로그인 횟수를 집계한다.',
+    '3. 새벽 시간 로그인 기록: regdate 기준 00:00~05:59 사이 로그인/인증/접속 행위를 확인한다.',
+    '4. 권한 변경 건수: 계정 로그의 권한 값 변화 또는 액션 로그의 계정관리/권한변경 관련 act_name, act, request_uri를 확인한다.',
+    '5. 관리자 계정 목록: 계정 로그의 ADMIN=Y 또는 관리자 권한으로 식별되는 계정을 나열한다.',
+    '6. 계정은 있으나 한 번도 접속하지 않은 계정: 계정 로그에는 존재하지만 로그인-ACCESS가 비어 있거나 액션 로그 로그인 이력이 없는 계정을 확인한다.',
+    '7. 개인정보취급 권한이 있는 계정: 계정 로그의 개인정보권한, 개인정보-ACCESS 값을 확인하고 개인정보 관련 액션 로그가 있으면 함께 교차 확인한다.',
+    '각 항목의 근거에는 실제 로그 값 또는 집계 기준을 포함한다. 예: email_address=..., ipaddress=..., regdate=..., act_name=..., request_uri=..., 시트명/행 번호.',
+  ].join('\n');
+};
 
 export const generateReviewGuide = async (request: ReviewRequestInput, settings?: OpenAISettingsInput) => {
   const resolved = resolveOpenAISettings(settings);
@@ -115,7 +136,7 @@ export const generateReviewGuide = async (request: ReviewRequestInput, settings?
         {
       role: 'system',
       content:
-            'You are a log review assistant. Reply in Korean and output only one Markdown table. Use exactly these columns: 항목, 내용, 판단, 근거, 조치. Do not add any prose before or after the table. Use concise sentences. Base your analysis primarily on the uploaded file contents and the attached prompt. If a field is missing, write -. Do not use code fences. When judging dates, use calendar-based weekday verification only. Never infer weekend status from a date string without checking the actual weekday. If a date is mentioned, the evidence cell must include the exact date string and the weekday together.',
+            'You are a log review assistant. Reply in Korean and output only one Markdown table. Use exactly these columns: 항목, 내용, 판단, 근거, 조치. Do not add any prose before or after the table. Use concise sentences. Base your analysis primarily on the uploaded file contents and the attached prompt. If a field is missing, write -. Do not use code fences. The evidence cell must include concrete source log values from the provided attachment, such as sheet name, row number, column names, email, IP address, URI, act_name, request_vars, regdate, permission value, or access timestamp. Do not write generic evidence without actual log values. When judging dates, use calendar-based weekday verification only. Never infer weekend status from a date string without checking the actual weekday. If a date is mentioned, the evidence cell must include the exact date string and the weekday together.',
         },
         {
           role: 'user',
@@ -132,9 +153,12 @@ export const generateReviewGuide = async (request: ReviewRequestInput, settings?
                 `- 첨부 파일 목록: ${(request.attachments ?? []).map((item) => item.fileName).join(', ') || '-'}\n` +
                 `- 첨부 파일 분석 메모:\n` +
                 (request.attachments?.length ? formatAttachmentSummary(request.attachments) : '-') +
+                `\n- 서비스별 필수 점검 항목:\n${getServiceSpecificInstruction(request.serviceName)}` +
                 `\n- 날짜 판정 규칙:\n${getDateRuleInstruction()}` +
                 `\n\n결과 요구사항:\n` +
                 `- 반드시 첨부 파일에서 확인한 사실을 우선 적어.\n` +
+                `- 근거 칸에는 실제 로그 내용 일부를 반드시 포함해. 예: 시트명, 행 번호, 컬럼명=값, email_address, ipaddress, request_uri, request_vars, regdate, 권한명, ACCESS 값.\n` +
+                `- 근거 칸에 "-", "확인 불가", "로그에서 확인"처럼 추상적으로만 쓰지 마. 실제 원문 값이 없으면 해당 항목을 만들지 마.\n` +
                 `- 추측은 최소화하고, 불확실하면 불확실하다고 적어.\n` +
                 `- 날짜가 있으면 근거 칸에 날짜 문자열과 요일을 함께 적어.\n` +
                 `- YYYY-MM-DD만 보고 주말이라고 쓰지 말고, 실제 달력 요일로만 판단해.\n` +

@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import * as XLSX from 'xlsx';
 import { isSupabaseConfigured, supabase } from './lib/supabase';
 import { generateReviewGuide, isOpenAIConfigured } from './lib/openai';
 
@@ -218,6 +219,20 @@ const formatKoreaDate = (value?: string | Date | null) => {
     month: '2-digit',
     day: '2-digit',
   }).format(date);
+};
+
+const getNextDayDate = (value?: string | Date | null) => {
+  if (!value) return null;
+
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+
+  return new Date(date.getTime() + 24 * 60 * 60 * 1000);
+};
+
+const formatNextKoreaDate = (value?: string | Date | null) => {
+  const nextDate = getNextDayDate(value);
+  return nextDate ? formatKoreaDate(nextDate) : '-';
 };
 
 const formatDisplayNameWithUnit = (name?: string | null, unitName?: string | null) => {
@@ -507,13 +522,72 @@ const sanitizeStorageFileName = (name: string) => name.replace(/[^a-zA-Z0-9._-]+
 
 const allowedLogExtensions = new Set(['log', 'csv', 'json', 'xlsx']);
 const textPreviewExtensions = new Set(['log', 'csv', 'json']);
+const xlsxPreviewMaxRowsPerSheet = 80;
+const xlsxPreviewMaxColumnsPerSheet = 16;
 
 const shouldPreviewFile = (file: File) => {
   const extension = file.name.split('.').pop()?.toLowerCase() ?? '';
   return file.type.startsWith('text/') || textPreviewExtensions.has(extension);
 };
 
+const normalizeCellValue = (value: unknown) => {
+  if (value === null || value === undefined) return '';
+  if (value instanceof Date) return formatKoreaDateTime(value);
+  return String(value).replace(/\s+/g, ' ').trim();
+};
+
+const buildXlsxPreview = async (file: File) => {
+  try {
+    const workbook = XLSX.read(await file.arrayBuffer(), {
+      type: 'array',
+      cellDates: true,
+    });
+
+    const sheetSummaries = workbook.SheetNames.map((sheetName) => {
+      const worksheet = workbook.Sheets[sheetName];
+      const rows = XLSX.utils.sheet_to_json<unknown[]>(worksheet, {
+        header: 1,
+        blankrows: false,
+        raw: false,
+      });
+      const normalizedRows = rows
+        .map((row) => row.map(normalizeCellValue))
+        .filter((row) => row.some(Boolean));
+      const sampledRows = normalizedRows
+        .slice(0, xlsxPreviewMaxRowsPerSheet)
+        .map((row) => row.slice(0, xlsxPreviewMaxColumnsPerSheet));
+      const columnCount = normalizedRows.reduce((max, row) => Math.max(max, row.length), 0);
+      const header = sampledRows[0] ?? [];
+
+      return [
+        `시트: ${sheetName}`,
+        `행 수: ${normalizedRows.length}`,
+        `열 수: ${columnCount}`,
+        `헤더: ${header.join(' | ') || '-'}`,
+        '샘플 데이터:',
+        ...sampledRows.slice(1).map((row, index) => `행 ${index + 2}: ${row.join(' | ')}`),
+      ].join('\n');
+    });
+
+    const preview = [
+      `엑셀 파일명: ${file.name}`,
+      `시트 수: ${workbook.SheetNames.length}`,
+      ...sheetSummaries,
+    ].join('\n\n');
+
+    return preview.slice(0, 16000) || null;
+  } catch (error) {
+    console.error('Failed to extract xlsx preview:', error);
+    return null;
+  }
+};
+
 const buildFilePreview = async (file: File) => {
+  const extension = file.name.split('.').pop()?.toLowerCase() ?? '';
+  if (extension === 'xlsx') {
+    return buildXlsxPreview(file);
+  }
+
   if (!shouldPreviewFile(file)) return null;
 
   try {
@@ -1468,16 +1542,10 @@ function App() {
 
     const requestMap = new Map((requestRows ?? []).map((row) => [row.id, row]));
 
-    const resultRows = [...(data ?? [])].sort((first, second) => {
-      const firstTime = new Date(first.created_at).getTime();
-      const secondTime = new Date(second.created_at).getTime();
-      return (Number.isNaN(secondTime) ? 0 : secondTime) - (Number.isNaN(firstTime) ? 0 : firstTime);
-    });
-
-    const dbResults = resultRows.map((row) => {
+    const dbResultsWithSort = (data ?? []).map((row) => {
       const request = requestMap.get(row.request_id ?? '') ?? requests.find((item) => item.id === row.request_id);
       const requestDate = request?.request_created_at || request?.created_at;
-      const completedDate = row.created_at;
+      const completedDate = getNextDayDate(requestDate);
       const reviewer = members.find((member) => member.id === row.reviewer_id);
       const reviewerName = reviewer
         ? formatDisplayNameWithUnit(reviewer.name, reviewer.unitName)
@@ -1486,16 +1554,23 @@ function App() {
           : '미지정';
 
       return {
-        id: row.id,
-        requestId: row.request_id ?? '',
-        serviceName: request?.service_name ?? '',
-        requesterName: request?.requester_name ?? '',
-        requestCreatedAt: formatKoreaDate(requestDate),
-        reviewerName,
-        completedAt: formatKoreaDate(completedDate),
-        resultText: row.summary ?? '',
+        sortTime: completedDate?.getTime() ?? 0,
+        result: {
+          id: row.id,
+          requestId: row.request_id ?? '',
+          serviceName: request?.service_name ?? '',
+          requesterName: request?.requester_name ?? '',
+          requestCreatedAt: formatKoreaDate(requestDate),
+          reviewerName,
+          completedAt: formatNextKoreaDate(requestDate),
+          resultText: row.summary ?? '',
+        },
       };
     });
+
+    const dbResults = dbResultsWithSort
+      .sort((first, second) => second.sortTime - first.sortTime)
+      .map((item) => item.result);
 
     setReviewResults(dbResults);
   };
@@ -1552,12 +1627,10 @@ function App() {
             return attachment;
           }
 
-          const previewText = shouldPreviewFile({
-            name: attachment.fileName,
-            type: attachment.mimeType || '',
-          } as File)
-            ? (await data.text()).trim().slice(0, 4000) || null
-            : null;
+          const previewFile = new File([data], attachment.fileName, {
+            type: attachment.mimeType || data.type || 'application/octet-stream',
+          });
+          const previewText = await buildFilePreview(previewFile);
 
           return {
             ...attachment,
@@ -2312,6 +2385,10 @@ function App() {
                 reviewGuideProgress={reviewGuideProgress}
                 reviewGuideError={reviewGuideError}
                 onSelectRequest={setSelectedRequestId}
+                onClearReviewGuide={() => {
+                  setReviewGuideText('');
+                  setReviewGuideError(null);
+                }}
                 onStartReview={startReview}
                 onCompleteReview={completeReview}
                 currentUserRole={currentUserRole}
@@ -2783,6 +2860,7 @@ function ReviewResultView({
   onUpdateRequestCreatedAt,
   onToggleRequestSelection,
   onRemoveSelectedRequests,
+  onClearReviewGuide,
 }: {
   requests: ReviewRequest[];
   selectedRequestId: string | null;
@@ -2794,6 +2872,7 @@ function ReviewResultView({
   currentUserRole: UserRole;
   selectedRequestIds: string[];
   onSelectRequest: (requestId: string | null) => void;
+  onClearReviewGuide: () => void;
   onStartReview: (requestId: string) => Promise<void>;
   onCompleteReview: (reviewText: string) => void;
   onUpdateRequestCreatedAt: (requestId: string, dateValue: string) => void;
@@ -2801,12 +2880,15 @@ function ReviewResultView({
   onRemoveSelectedRequests: () => void;
 }) {
   const [reviewResultText, setReviewResultText] = useState('');
+  const [requestPage, setRequestPage] = useState(1);
   const reviewResultEditorRef = useRef<HTMLDivElement | null>(null);
-  const activeRequests = useMemo(
-    () => requests.filter((request) => request.status !== 'done'),
-    [requests],
+  const requestsPerPage = 10;
+  const requestPageCount = Math.max(1, Math.ceil(requests.length / requestsPerPage));
+  const pagedRequests = useMemo(
+    () => requests.slice((requestPage - 1) * requestsPerPage, requestPage * requestsPerPage),
+    [requestPage, requests],
   );
-  const selectedRequest = activeRequests.find((request) => request.id === selectedRequestId) ?? null;
+  const selectedRequest = requests.find((request) => request.id === selectedRequestId) ?? null;
   const canDeleteRequests = isReviewerOrAbove(currentUserRole);
   const parsedReviewGuideRows = useMemo(
     () => (reviewGuideText ? parseReviewGuideTable(reviewGuideText) : null),
@@ -2824,22 +2906,28 @@ function ReviewResultView({
   }, [reviewResultText]);
 
   useEffect(() => {
-    if (activeRequests.length === 0) {
+    if (requestPage > requestPageCount) {
+      setRequestPage(requestPageCount);
+    }
+  }, [requestPage, requestPageCount]);
+
+  useEffect(() => {
+    if (requests.length === 0) {
       if (selectedRequestId) {
         onSelectRequest(null);
       }
       return;
     }
 
-    const selectedExists = selectedRequestId ? activeRequests.some((request) => request.id === selectedRequestId) : false;
+    const selectedExists = selectedRequestId ? requests.some((request) => request.id === selectedRequestId) : false;
     if (!selectedRequestId || !selectedExists) {
-      const latestRequest = activeRequests[0];
+      const latestRequest = requests[0];
       if (latestRequest) {
         // Keep the review screen focused on the latest request while still allowing selection.
         onSelectRequest(latestRequest.id);
       }
     }
-  }, [activeRequests, onSelectRequest, selectedRequestId]);
+  }, [onSelectRequest, requests, selectedRequestId]);
 
   const handleStartReview = () => {
     if (!selectedRequest) return;
@@ -2847,7 +2935,12 @@ function ReviewResultView({
   };
 
   const handleSelectRequest = (requestId: string) => {
+    const request = requests.find((item) => item.id === requestId);
     onSelectRequest(requestId);
+    if (request?.status === 'done') {
+      onClearReviewGuide();
+      return;
+    }
     void onStartReview(requestId);
   };
 
@@ -2902,10 +2995,10 @@ function ReviewResultView({
               <span className="text-14">로그파일</span>
               <span className="text-14">상태</span>
             </div>
-            {activeRequests.length === 0 ? (
+            {requests.length === 0 ? (
               <div className="empty-state">아직 검토 요청이 없습니다.</div>
             ) : (
-              activeRequests.slice(0, 6).map((request, index) => (
+              pagedRequests.map((request, index) => (
                 <div
                   key={request.id}
                   className={`table-row result-entry-row request-queue-row ${request.id === selectedRequestId ? 'active' : ''}`}
@@ -2934,7 +3027,7 @@ function ReviewResultView({
                       '-'
                     )}
                   </span>
-                  <span className="text-12">{index + 1}</span>
+                  <span className="text-12">{(requestPage - 1) * requestsPerPage + index + 1}</span>
                   <span className="text-12">{request.service_name || '-'}</span>
                   <span className="text-12">{request.title}</span>
                   <span className="text-12">{request.requester_name}</span>
@@ -2962,6 +3055,24 @@ function ReviewResultView({
               ))
             )}
           </div>
+          {requests.length > requestsPerPage && (
+            <div className="request-pagination" aria-label="검토 요청 페이지">
+              {Array.from({ length: requestPageCount }, (_item, index) => {
+                const page = index + 1;
+                return (
+                  <button
+                    key={page}
+                    className={`request-page-btn text-12 ${requestPage === page ? 'active' : ''}`}
+                    type="button"
+                    onClick={() => setRequestPage(page)}
+                    aria-current={requestPage === page ? 'page' : undefined}
+                  >
+                    {page}
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
         <div className="review-guide-card">
           {reviewGuideLoading && (
@@ -3058,7 +3169,12 @@ function ReviewResultView({
           </div>
         </div>
         <div className="request-actions">
-          <button className="primary-btn text-12" type="button" onClick={handleCompleteReview} disabled={!selectedRequest}>
+          <button
+            className="primary-btn text-12"
+            type="button"
+            onClick={handleCompleteReview}
+            disabled={!selectedRequest || selectedRequest.status === 'done'}
+          >
             <span className="text-12">검토 완료</span>
           </button>
         </div>
@@ -3082,14 +3198,24 @@ function ResultLogView({
   onToggleResultSelection: (resultId: string, checked: boolean) => void;
   onRemoveSelectedResults: () => void;
 }) {
-  const requestNumberById = useMemo(
-    () => new Map(requests.map((request, index) => [request.id, index + 1])),
-    [requests],
+  const [resultPage, setResultPage] = useState(1);
+  const resultsPerPage = 15;
+  const resultPageCount = Math.max(1, Math.ceil(results.length / resultsPerPage));
+  const pagedResults = useMemo(
+    () => results.slice((resultPage - 1) * resultsPerPage, resultPage * resultsPerPage),
+    [resultPage, results],
   );
+
+  useEffect(() => {
+    if (resultPage > resultPageCount) {
+      setResultPage(resultPageCount);
+    }
+  }, [resultPage, resultPageCount]);
+
   const csvRows = useMemo(
     () =>
-      results.map((result) => ({
-        number: requestNumberById.get(result.requestId) ?? '-',
+      results.map((result, index) => ({
+        number: results.length - index,
         requestCreatedAt: result.requestCreatedAt || '-',
         completedAt: result.completedAt,
         serviceName: result.serviceName || '-',
@@ -3097,7 +3223,7 @@ function ResultLogView({
         reviewerName: result.reviewerName,
         resultText: result.resultText,
       })),
-    [requestNumberById, results],
+    [results],
   );
 
   const handlePrintPdf = () => {
@@ -3309,7 +3435,7 @@ function ResultLogView({
                   </tr>
                 </thead>
                 <tbody>
-                  {results.map((result) => (
+                  {pagedResults.map((result, index) => (
                     <tr key={result.id}>
                       {currentUserRole === 'admin' && (
                         <td className="text-12 result-log-id-cell result-log-select-col">
@@ -3322,7 +3448,9 @@ function ResultLogView({
                           />
                         </td>
                       )}
-                      <td className="text-12 result-log-id-cell">{requestNumberById.get(result.requestId) ?? '-'}</td>
+                      <td className="text-12 result-log-id-cell">
+                        {results.length - ((resultPage - 1) * resultsPerPage + index)}
+                      </td>
                       <td className="text-12">{result.requestCreatedAt || '-'}</td>
                       <td className="text-12">{result.completedAt}</td>
                       <td className="text-12">{result.serviceName || '-'}</td>
@@ -3340,6 +3468,24 @@ function ResultLogView({
                   ))}
                 </tbody>
               </table>
+              {results.length > resultsPerPage && (
+                <div className="request-pagination result-log-pagination" aria-label="결과 로그 페이지">
+                  {Array.from({ length: resultPageCount }, (_item, index) => {
+                    const page = index + 1;
+                    return (
+                      <button
+                        key={page}
+                        className={`request-page-btn text-12 ${resultPage === page ? 'active' : ''}`}
+                        type="button"
+                        onClick={() => setResultPage(page)}
+                        aria-current={resultPage === page ? 'page' : undefined}
+                      >
+                        {page}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
         </div>
