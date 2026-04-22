@@ -824,6 +824,11 @@ button {
   color: var(--muted);
 }
 
+.queue-month-reset {
+  min-height: 28px;
+  padding: 0 10px;
+}
+
 .queue-calendar-grid {
   display: grid;
   grid-template-columns: repeat(12, minmax(0, 1fr));
@@ -839,11 +844,19 @@ button {
   border-radius: 10px;
   background: #fff;
   text-align: center;
+  color: var(--text);
+  cursor: pointer;
 }
 
 .queue-month.has-history {
   border-color: rgba(68, 98, 255, 0.2);
   background: linear-gradient(180deg, #ffffff 0%, #f6f8ff 100%);
+}
+
+.queue-month.active {
+  border-color: rgba(68, 98, 255, 0.5);
+  background: linear-gradient(180deg, #edf3ff 0%, #ffffff 100%);
+  box-shadow: 0 0 0 1px rgba(68, 98, 255, 0.16) inset;
 }
 
 .queue-month-name,
@@ -2438,19 +2451,44 @@ button {
   color: var(--muted);
 }
 
-.csv-preview-body {
+.csv-preview-table-wrap {
   min-height: 0;
-  margin: 0;
-  padding: 12px 14px;
   overflow: auto;
   border: 1px solid #eef1f6;
   border-radius: 10px;
   background: #fbfcff;
+}
+
+.csv-preview-table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
   color: var(--text);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+}
+
+.csv-preview-table th,
+.csv-preview-table td {
+  padding: 8px 10px;
+  border: 1px solid #eef1f6;
   font-size: 11px !important;
-  line-height: 1.55;
-  white-space: pre;
+  line-height: 1.45;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+.csv-preview-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #f5f7fb;
+  font-weight: 800;
+  text-align: center;
+}
+
+.csv-preview-table td {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .result-entry-table textarea.result-entry-value {
@@ -3772,9 +3810,11 @@ textarea {
     font-size: 9px !important;
   }
 
-  .csv-preview-body {
+  .csv-preview-table th,
+  .csv-preview-table td {
+    padding: 6px 8px;
     font-size: 9px !important;
-    padding: 10px;
+    max-width: 180px;
   }
 
   .permissions-layout {

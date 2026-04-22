@@ -90,7 +90,7 @@ const formatAttachmentSummary = (attachments: NonNullable<ReviewRequestInput['at
         ? [
             `원본 파일: ${item.originalFileName ?? item.fileName}`,
             '분석 기준: 업로드 원본이 아니라 파싱되어 저장된 CSV 내용을 기준으로 분석한다.',
-            '파싱 CSV 주요 컬럼: line_number, date, time, timestamp, service, action, target_email, actor_email, ip_addresses, primary_ip, emails, file_name, reason, bracket_groups, message, raw.',
+            '파싱 CSV 주요 컬럼: line_number, date, time, timestamp, service, action, target_email, actor_email, ip_addresses, primary_ip, emails, file_name, reason, square_bracket_1~5, parenthesis_1~5, bracket_groups, message, raw.',
           ].join('\n')
         : '';
       return [

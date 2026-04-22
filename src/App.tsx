@@ -571,6 +571,53 @@ const replaceFileExtension = (name: string, extension: string) => {
 
 const escapeCsvCell = (value: string | number) => `"${String(value).replace(/"/g, '""')}"`;
 
+const parseCsvPreviewRows = (text: string, maxRows = 80) => {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = '';
+  let quoted = false;
+  const csvText = text.replace(/^\uFEFF/, '');
+
+  for (let index = 0; index < csvText.length; index += 1) {
+    const char = csvText[index];
+    const nextChar = csvText[index + 1];
+
+    if (quoted) {
+      if (char === '"' && nextChar === '"') {
+        cell += '"';
+        index += 1;
+      } else if (char === '"') {
+        quoted = false;
+      } else {
+        cell += char;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      quoted = true;
+    } else if (char === ',') {
+      row.push(cell);
+      cell = '';
+    } else if (char === '\n') {
+      row.push(cell);
+      rows.push(row);
+      if (rows.length >= maxRows) return rows;
+      row = [];
+      cell = '';
+    } else if (char !== '\r') {
+      cell += char;
+    }
+  }
+
+  if (cell || row.length) {
+    row.push(cell);
+    rows.push(row);
+  }
+
+  return rows;
+};
+
 const uniqueValues = (values: string[]) => Array.from(new Set(values.filter(Boolean)));
 
 const knownLogActions = [
@@ -597,12 +644,47 @@ const extractKnownLogAction = (message: string) => {
   return knownLogActions.find((action) => normalized.startsWith(action)) ?? '';
 };
 
+const extractDelimitedGroups = (line: string, openChar: string, closeChar: string) => {
+  const groups: string[] = [];
+  let depth = 0;
+  let startIndex = -1;
+
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+
+    if (char === openChar) {
+      if (depth === 0) {
+        startIndex = index;
+      }
+      depth += 1;
+      continue;
+    }
+
+    if (char === closeChar && depth > 0) {
+      depth -= 1;
+      if (depth === 0 && startIndex >= 0) {
+        groups.push(line.slice(startIndex, index + 1));
+        startIndex = -1;
+      }
+    }
+  }
+
+  return uniqueValues(groups);
+};
+
+const getFixedGroupColumns = (groups: string[], size = 5) =>
+  Array.from({ length: size }, (_item, index) => groups[index] ?? '');
+
 const parseLogLine = (line: string) => {
   const dateMatch = line.match(/\b\d{4}[-/.]\s?\d{1,2}[-/.]\s?\d{1,2}\b/);
   const timeMatch = line.match(/\b\d{2}:\d{2}:\d{2}(?:[.,]\d{1,6})?\b/);
   const monthTimestampMatch = line.match(/\b[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\b/);
   const levelMatch = line.match(/\b(TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL|CRITICAL)\b/i);
-  const bracketGroups = uniqueValues(line.match(/\[[^\]]+\]|\([^)]+\)|\{[^}]+\}|<[^>\s][^>]*>/g) ?? []);
+  const squareBracketGroups = extractDelimitedGroups(line, '[', ']');
+  const parenthesisGroups = extractDelimitedGroups(line, '(', ')');
+  const braceGroups = extractDelimitedGroups(line, '{', '}');
+  const angleGroups = uniqueValues(line.match(/<[^>\s][^>]*>/g) ?? []);
+  const bracketGroups = uniqueValues([...squareBracketGroups, ...parenthesisGroups, ...braceGroups, ...angleGroups]);
   const emails = uniqueValues(line.match(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi) ?? []);
   const ipAddresses = uniqueValues(
     line.match(/\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/g) ?? [],
@@ -664,6 +746,8 @@ const parseLogLine = (line: string) => {
     httpMethod: httpMethodMatch?.[0] ?? '',
     statusCode,
     requestUri,
+    squareBracketGroups: getFixedGroupColumns(squareBracketGroups),
+    parenthesisGroups: getFixedGroupColumns(parenthesisGroups),
     bracketGroups: bracketGroups.join(' | '),
     message,
     raw: line,
@@ -691,6 +775,16 @@ const convertLogFileToCsv = async (file: File) => {
     'http_method',
     'status_code',
     'request_uri',
+    'square_bracket_1',
+    'square_bracket_2',
+    'square_bracket_3',
+    'square_bracket_4',
+    'square_bracket_5',
+    'parenthesis_1',
+    'parenthesis_2',
+    'parenthesis_3',
+    'parenthesis_4',
+    'parenthesis_5',
     'bracket_groups',
     'message',
     'raw',
@@ -715,6 +809,8 @@ const convertLogFileToCsv = async (file: File) => {
       parsed.httpMethod,
       parsed.statusCode,
       parsed.requestUri,
+      ...parsed.squareBracketGroups,
+      ...parsed.parenthesisGroups,
       parsed.bracketGroups,
       parsed.message,
       parsed.raw,
@@ -2999,6 +3095,7 @@ function Dashboard({
   onNavigate: (viewId: ViewId) => void;
   canNavigate: boolean;
 }) {
+  const [selectedMonth, setSelectedMonth] = useState<string | null>(null);
   const summaryRows: Array<WorkItem & { targetView: ViewId }> = [
     { label: '전체', value: String(stats.total), targetView: 'result-log' },
     { label: '대기', value: String(stats.submitted), targetView: 'review-result' },
@@ -3021,6 +3118,12 @@ function Dashboard({
       done: monthRequests.filter((request) => request.status === 'done').length,
     };
   });
+  const filteredRecent = selectedMonth
+    ? recent.filter((request) => {
+        const parts = getKoreaDateParts(getDashboardCreatedAt(request));
+        return parts.year === calendarYear && parts.month === selectedMonth;
+      })
+    : recent;
 
   return (
     <section className="workspace review-result-workspace">
@@ -3057,10 +3160,22 @@ function Dashboard({
         <div className="queue-calendar">
           <div className="queue-calendar-header">
             <strong className="text-14">{calendarYear} 월별 검토 이력</strong>
+            {selectedMonth && (
+              <button className="secondary-btn text-12 queue-month-reset" type="button" onClick={() => setSelectedMonth(null)}>
+                <span className="text-12">전체 보기</span>
+              </button>
+            )}
           </div>
           <div className="queue-calendar-grid" aria-label={`${calendarYear} 월별 검토 이력`}>
             {monthlyHistory.map((item) => (
-              <div className={`queue-month ${item.total > 0 ? 'has-history' : ''}`} key={item.month}>
+              <button
+                className={`queue-month ${item.total > 0 ? 'has-history' : ''} ${selectedMonth === item.month ? 'active' : ''}`}
+                key={item.month}
+                type="button"
+                onClick={() => setSelectedMonth((current) => (current === item.month ? null : item.month))}
+                aria-pressed={selectedMonth === item.month}
+                aria-label={`${Number(item.month)}월 검토 이력 보기`}
+              >
                 <span className="queue-month-name text-12">{Number(item.month)}월</span>
                 <strong className="queue-month-total text-14">{item.total}</strong>
                 <div className="queue-month-bars" aria-hidden="true">
@@ -3072,7 +3187,7 @@ function Dashboard({
                 <span className="queue-month-status text-12">
                   완료 {item.done} · 진행 {item.inReview} · 대기 {item.submitted}
                 </span>
-              </div>
+              </button>
             ))}
           </div>
         </div>
@@ -3081,7 +3196,9 @@ function Dashboard({
       <article className="detail-card permissions-card">
         <div className="table-header split">
           <h3 className="text-14">Recent requests</h3>
-          <span className="text-12">{recent.length} items</span>
+          <span className="text-12">
+            {selectedMonth ? `${Number(selectedMonth)}월 ${filteredRecent.length} items` : `${filteredRecent.length} items`}
+          </span>
         </div>
         <div className="table-card dense-table recent-requests-table">
           <div className="table">
@@ -3091,7 +3208,7 @@ function Dashboard({
               <span className="text-13">Status</span>
               <span className="text-13">Created</span>
             </div>
-            {recent.map((item) => (
+            {filteredRecent.map((item) => (
               <div className="table-row recent-row" key={item.id}>
                 <span className="text-12 table-cell-center">{item.title}</span>
                 <span className="text-12 table-cell-center">{item.requester_name}</span>
@@ -3099,7 +3216,7 @@ function Dashboard({
                 <span className="text-12 table-cell-center">{formatKoreaDateTime(getDashboardCreatedAt(item))}</span>
               </div>
             ))}
-            {recent.length === 0 && <div className="empty-state">아직 요청이 없습니다.</div>}
+            {filteredRecent.length === 0 && <div className="empty-state">선택한 월의 요청이 없습니다.</div>}
           </div>
         </div>
       </article>
@@ -3408,6 +3525,7 @@ function ReviewResultView({
     fileName: string;
     blob: Blob;
     previewText: string;
+    rows: string[][];
     isTruncated: boolean;
   } | null>(null);
   const reviewResultEditorRef = useRef<HTMLDivElement | null>(null);
@@ -3560,6 +3678,7 @@ function ReviewResultView({
         fileName: downloadFileName,
         blob: downloadBlob,
         previewText,
+        rows: parseCsvPreviewRows(previewText),
         isTruncated: downloadBlob.size > previewSliceSize,
       });
     } catch (error) {
@@ -3857,9 +3976,36 @@ function ReviewResultView({
             </div>
           </div>
           {csvPreview.isTruncated && (
-            <div className="csv-preview-note text-12">파일이 커서 앞부분만 미리보기로 표시합니다. 다운로드는 전체 CSV 파일로 받습니다.</div>
+            <div className="csv-preview-note text-12">파일이 커서 앞부분 최대 79행만 미리보기로 표시합니다. 다운로드는 전체 CSV 파일로 받습니다.</div>
           )}
-          <pre className="csv-preview-body text-12">{csvPreview.previewText || '미리볼 내용이 없습니다.'}</pre>
+          <div className="csv-preview-table-wrap">
+            {csvPreview.rows.length > 0 ? (
+              <table className="csv-preview-table">
+                <thead>
+                  <tr>
+                    {(csvPreview.rows[0] ?? []).map((cell, index) => (
+                      <th className="text-12" key={`csv-preview-head-${index}`}>
+                        {cell || `column_${index + 1}`}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {csvPreview.rows.slice(1).map((row, rowIndex) => (
+                    <tr key={`csv-preview-row-${rowIndex}`}>
+                      {(csvPreview.rows[0] ?? row).map((_header, cellIndex) => (
+                        <td className="text-12" key={`csv-preview-cell-${rowIndex}-${cellIndex}`}>
+                          {row[cellIndex] ?? ''}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <div className="empty-state">미리볼 내용이 없습니다.</div>
+            )}
+          </div>
         </div>
       </div>
     )}
