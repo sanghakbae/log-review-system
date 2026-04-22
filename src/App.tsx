@@ -1811,9 +1811,33 @@ function App() {
 
   useEffect(() => {
     const loadRequests = async () => {
-      if (!isSupabaseConfigured || !sessionUser) {
+      if (!isSupabaseConfigured) {
         setRequests([]);
         setRequestsLoaded(false);
+        return;
+      }
+
+      if (!sessionUser) {
+        const { data, error } = await supabase
+          .from('lr_public_review_requests')
+          .select('id, title, requester_name, status, request_created_at, created_at, service_name, log_file_count')
+          .order('created_at', { ascending: false });
+
+        if (error) {
+          console.error('Failed to load public review requests:', error.message);
+          setRequests([]);
+          setRequestsLoaded(true);
+          return;
+        }
+
+        const publicRequests = (data ?? []).map((item) => ({
+          ...item,
+          request_created_at: item.request_created_at || item.created_at,
+          file_summaries: [],
+        })) as ReviewRequest[];
+
+        setRequests(publicRequests);
+        setRequestsLoaded(true);
         return;
       }
 

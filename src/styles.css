@@ -177,9 +177,10 @@ button {
   z-index: 5;
   width: 34px;
   min-width: 34px;
-  height: 18px;
-  min-height: 18px;
-  margin-top: -24px;
+  height: 14px;
+  min-height: 14px;
+  align-self: start;
+  margin-top: 1px;
   padding: 0;
   border: 1px solid rgba(168, 128, 72, 0.2);
   border-radius: 999px;
