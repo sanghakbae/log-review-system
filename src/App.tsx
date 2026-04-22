@@ -1403,7 +1403,7 @@ function App() {
       setSessionUser(nextUser);
       if (nextUser) {
         setCurrentProfileRole(getCachedProfileRole(nextUser.id));
-        setCurrentProfileLoaded(true);
+        setCurrentProfileLoaded(false);
       }
       setLoadingAuth(false);
     });
@@ -1413,7 +1413,7 @@ function App() {
       setSessionUser(nextUser);
       if (nextUser) {
         setCurrentProfileRole(getCachedProfileRole(nextUser.id));
-        setCurrentProfileLoaded(true);
+        setCurrentProfileLoaded(false);
       }
     });
 
@@ -1841,12 +1841,10 @@ function App() {
         console.error('Failed to load review attachments:', attachmentError.message);
       }
 
-      const migratedAttachmentData = await Promise.all(
-        ((attachmentData ?? []) as ReviewAttachmentRow[]).map((attachment) => migrateStoredAttachmentToParsedCsv(attachment)),
-      );
+      const reviewAttachments = (attachmentData ?? []) as ReviewAttachmentRow[];
       const attachmentCounts = new Map<string, number>();
       const attachmentSummaries = new Map<string, ReviewFileSummary[]>();
-      for (const attachment of migratedAttachmentData) {
+      for (const attachment of reviewAttachments) {
         attachmentCounts.set(attachment.request_id, (attachmentCounts.get(attachment.request_id) ?? 0) + 1);
         const parsedSummary: ReviewFileSummary = {
           fileName: attachment.file_name,
