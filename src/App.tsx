@@ -10,6 +10,7 @@ type PermissionSectionId = 'members' | 'webhook' | 'prompts' | 'openai' | 'servi
 type ReviewRequest = {
   id: string;
   title: string;
+  requester_id?: string;
   requester_name: string;
   service_name?: string;
   log_file_count?: number;
@@ -75,6 +76,7 @@ type SessionUser = {
 
 type ReviewSubmission = {
   title: string;
+  requesterId?: string;
   requesterName: string;
   serviceName: string;
   logFiles: ReviewUploadFile[];
@@ -125,7 +127,7 @@ const normalizeProfileRole = (role?: string | null): UserRole =>
 const navItems: Array<{ id: ViewId; label: string; description: string }> = [
   { id: 'dashboard', label: '대시보드', description: '전체 현황' },
   { id: 'review-write', label: '검토 작성', description: '로그 요청' },
-  { id: 'review-result', label: '검토 결과', description: '' },
+  { id: 'review-result', label: '검토 결과', description: 'AI 검토' },
   { id: 'result-log', label: '결과 로그', description: '변경 이력' },
   { id: 'permissions', label: '설정', description: '서비스 관리' },
 ];
@@ -134,6 +136,11 @@ const roleLabel: Record<UserRole, string> = {
   requester: '요청자',
   reviewer: '검토자',
   admin: '관리자',
+};
+
+const formatMemberRequesterName = (member: Pick<Member, 'name' | 'email' | 'unitName'>) => {
+  const baseName = member.name.trim() || member.email.trim() || '미지정';
+  return member.unitName?.trim() ? `${baseName} (${member.unitName.trim()})` : baseName;
 };
 
 const accessByRole: Record<UserRole, ViewId[]> = {
@@ -153,6 +160,26 @@ const inputAutoSaveDelayMs = 3000;
 const sessionActivityStorageKey = 'log-review:last-activity-at';
 const profileRoleStorageKeyPrefix = 'log-review:profile-role';
 const isEndorphinAdminName = (name?: string | null) => name?.trim() === '엔돌핀';
+const accessRecordReviewPrompt = [
+  '너는 출입 인증 기록 감사 담당자다.',
+  '첨부된 출입기록 엑셀 또는 CSV를 기준으로 출입/인증 이상 이력을 한국어로 검토한다.',
+  '출력은 반드시 Markdown 표 1개만 사용한다.',
+  '표 컬럼은 `항목 | 내용 | 판단 | 근거 | 조치` 로 고정한다.',
+  '판단 값은 `양호`, `주의`, `위험` 중 하나만 사용한다.',
+  '근거에는 반드시 실제 컬럼명과 값을 포함한다. 예: 발생일자=2026-01-02, 요일=금요일, 발생시각=06:50:40, 단말기ID=0001, 사용자ID=0228, 이름=..., 모드=출근, 인증=얼굴, 결과=X, 시트명=Sheet1, 행=2.',
+  '아래 항목을 우선 점검한다.',
+  '1. 인증 실패 집중도: 결과=X 건을 사용자ID, 이름, 단말기ID, 발생일자, 발생시각 기준으로 집계한다.',
+  '2. 짧은 시간 내 반복 인증: 동일 사용자ID가 짧은 시간 안에 출입/해제/출근/퇴근을 반복한 이력을 확인한다.',
+  '3. 휴일 새벽에 출근한 이력: 발생일자가 실제 토요일/일요일 또는 휴일이고 발생시각이 새벽 시간대인 모드=출근 기록을 확인한다.',
+  '4. 동일 사용자 다중 단말기 사용: 같은 사용자ID가 같은 날 여러 단말기ID에서 인증한 이력을 확인한다.',
+  '5. 출입 흐름 정합성: 출근 없이 퇴근, 퇴근 없이 야간 출입, 외출 후 복귀 누락, 해제 후 출입 반복 등 모드 순서 이상을 확인한다.',
+  '6. 인증 수단 편중: 얼굴/카드 등 인증 방식이 특정 사용자ID, 단말기ID, 시간대에 몰리는지 확인한다.',
+  '7. 사용자 마스터 정보 누락: 사원번호, 직급 등 감사 식별에 필요한 컬럼이 비어 있는지 확인한다.',
+  '날짜가 있으면 실제 달력 기준 요일을 확인하고 근거에 날짜와 요일을 함께 적는다.',
+  '휴일 또는 주말 여부를 날짜 문자열만 보고 추정하지 않는다.',
+  '근거가 없는 항목은 만들지 않는다.',
+  '표 외의 머리말, 번호 목록, 맺음말, 코드블록은 쓰지 않는다.',
+].join('\n');
 const defaultReviewPromptSlots = [
   [
     '너는 범용 업무 검토 분석가다.',
@@ -170,10 +197,29 @@ const defaultReviewPromptSlots = [
     '결과는 실행 가능한 조치 중심으로 짧고 명확하게 쓴다.',
     '표 외의 머리말, 번호 목록, 맺음말, 코드블록은 쓰지 않는다.',
   ].join('\n'),
-  ...Array.from({ length: reviewPromptSlotCount - 1 }, () => ''),
+  '',
+  '',
+  '',
+  '',
+  accessRecordReviewPrompt,
+  '',
+  '',
+  '',
+  '',
 ];
 const defaultReviewPrompt = defaultReviewPromptSlots[0];
 const getDefaultReviewPromptSlot = (index: number) => defaultReviewPromptSlots[index] ?? '';
+const accessRecordPromptIndex = 5;
+const normalizeServiceKey = (value?: string | null) => value?.replace(/\s+/g, '').trim() ?? '';
+const resolvePromptIndexForService = (serviceName: string | null | undefined, selectedIndex: number) =>
+  normalizeServiceKey(serviceName) === '출입기록' ? accessRecordPromptIndex : selectedIndex;
+const resolvePromptTextForService = (serviceName: string | null | undefined, slots: string[], selectedIndex: number) => {
+  const promptIndex = resolvePromptIndexForService(serviceName, selectedIndex);
+  if (promptIndex === accessRecordPromptIndex) {
+    return slots[promptIndex]?.trim() ?? '';
+  }
+  return slots[promptIndex]?.trim() || defaultReviewPrompt;
+};
 const getSessionUser = (
   session: {
     user: {
@@ -1116,13 +1162,28 @@ const sendGoogleChatWebhook = async (webhookUrl: string, payload: { text: string
       }),
     });
 
-    if (relayResponse.ok) {
+    const relayContentType = relayResponse.headers.get('content-type') ?? '';
+    const relayPayload = relayContentType.includes('application/json')
+      ? await relayResponse.json().catch(() => null)
+      : null;
+
+    if (
+      relayResponse.ok &&
+      relayPayload &&
+      typeof relayPayload === 'object' &&
+      'ok' in relayPayload &&
+      relayPayload.ok === true
+    ) {
       return true;
     }
 
-    if (relayResponse.status !== 404) {
-      console.error('Google Chat webhook relay failed:', await relayResponse.text());
+    if (relayResponse.status !== 404 && relayPayload) {
+      console.error('Google Chat webhook relay failed:', relayPayload);
       return false;
+    }
+
+    if (relayResponse.ok && !relayPayload) {
+      console.warn('Google Chat webhook relay returned non-JSON response; falling back to Supabase Edge Function.');
     }
 
     if (isSupabaseConfigured) {
@@ -1939,7 +2000,7 @@ function App() {
 
       const { data, error } = await supabase
         .from('lr_review_requests')
-        .select('id, title, requester_name, status, request_created_at, created_at, request_body')
+        .select('id, title, requester_id, requester_name, status, request_created_at, created_at, request_body')
         .order('created_at', { ascending: false });
 
       if (error) {
@@ -2211,7 +2272,7 @@ function App() {
       const requestRow = {
         id: requestId,
         title,
-        requester_id: sessionUser.id,
+        requester_id: submission.requesterId ?? sessionUser.id,
         requester_name: requesterName,
         request_body: requestBody,
         status: 'submitted' as const,
@@ -2349,7 +2410,7 @@ function App() {
       const openAISettings = { apiKey: openAIApiKeyInput.trim() || openAIApiKeySnapshotRef.current, model: openAIModel };
 
       if (isOpenAIConfigured(openAISettings)) {
-        const effectivePromptText = reviewPromptSlots[selectedReviewPromptIndex] ?? defaultReviewPrompt;
+        const effectivePromptText = resolvePromptTextForService(request.service_name, reviewPromptSlots, selectedReviewPromptIndex);
         const attachments = await loadAttachmentPreviews(request.file_summaries ?? []);
         const guide = await generateReviewGuide({
           serviceName: request.service_name,
@@ -2815,16 +2876,75 @@ function App() {
     showSaveNotice('success', '저장 성공');
   };
 
+  const updateRequestRequester = async (requestId: string, memberId: string) => {
+    if (!isAdminRole(currentUserRole)) return;
+
+    const member = members.find((item) => item.id === memberId);
+    if (!member) return;
+
+    const requesterName = formatMemberRequesterName(member);
+    const previousRequests = requests;
+    const previousResults = reviewResults;
+
+    setRequests((current) =>
+      current.map((request) =>
+        request.id === requestId
+          ? { ...request, requester_id: member.id, requester_name: requesterName }
+          : request,
+      ),
+    );
+    setReviewResults((current) =>
+      current.map((result) =>
+        result.requestId === requestId ? { ...result, requesterName } : result,
+      ),
+    );
+
+    if (!isSupabaseConfigured || !sessionUser) {
+      showSaveNotice('success', '저장 성공');
+      return;
+    }
+
+    const { error } = await supabase
+      .from('lr_review_requests')
+      .update({
+        requester_id: member.id,
+        requester_name: requesterName,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', requestId);
+
+    if (error) {
+      console.error('Failed to update request requester:', error.message);
+      setRequests(previousRequests);
+      setReviewResults(previousResults);
+      showSaveNotice('error', '요청자 저장 실패');
+      return;
+    }
+
+    showSaveNotice('success', '저장 성공');
+  };
+
   const isAuthenticated = Boolean(sessionUser);
 
   return (
     <div className={`shell ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
       <aside className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
         <div className="brand">
-          <div className="brand-mark">LR</div>
+          <button
+            className="brand-mark"
+            type="button"
+            aria-label={sidebarCollapsed ? '사이드바 펼치기' : 'Log Review'}
+            title={sidebarCollapsed ? '사이드바 펼치기' : 'Log Review'}
+            onClick={() => {
+              if (sidebarCollapsed) {
+                setSidebarCollapsed(false);
+              }
+            }}
+          >
+            LR
+          </button>
           <div className="brand-copy">
             <div className="brand-title text-14">Log Review</div>
-            <div className="brand-subtitle text-12">Internal Operations</div>
           </div>
           <button
             className="sidebar-toggle icon-btn text-12"
@@ -2928,6 +3048,9 @@ function App() {
                 onSubmitRequest={submitReviewRequest}
                 onShowNotice={showSaveNotice}
                 serviceNames={serviceNames}
+                members={members}
+                currentUserRole={currentUserRole}
+                currentRequesterId={sessionUser?.id ?? ''}
                 currentRequesterName={
                   sessionUser
                     ? currentUserUnitName
@@ -2963,6 +3086,8 @@ function App() {
                   )
                 }
                 onRemoveSelectedRequests={() => void removeSelectedRequests()}
+                members={members}
+                onUpdateRequestRequester={(requestId, memberId) => void updateRequestRequester(requestId, memberId)}
               />
             )}
             {activeView === 'result-log' && (
@@ -3229,18 +3354,30 @@ function ReviewWriteView({
   onSubmitRequest,
   onShowNotice,
   serviceNames,
+  members,
+  currentUserRole,
+  currentRequesterId,
   currentRequesterName,
 }: {
   onSubmitRequest: (submission: ReviewSubmission) => Promise<ReviewSubmissionResult>;
   onShowNotice: (kind: 'success' | 'error', message: string) => void;
   serviceNames: string[];
+  members: Member[];
+  currentUserRole: UserRole;
+  currentRequesterId: string;
   currentRequesterName: string;
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [logFiles, setLogFiles] = useState<ReviewUploadFile[]>([]);
   const [requestTitle, setRequestTitle] = useState('');
   const [serviceName, setServiceName] = useState(serviceNames[0] ?? '');
+  const [selectedRequesterId, setSelectedRequesterId] = useState(currentRequesterId);
   const [requestError, setRequestError] = useState('');
+  const canSelectRequester = currentUserRole === 'admin';
+  const selectedMember = members.find((member) => member.id === selectedRequesterId);
+  const effectiveRequesterName = canSelectRequester && selectedMember
+    ? formatMemberRequesterName(selectedMember)
+    : currentRequesterName;
 
   useEffect(() => {
     if (serviceNames.length === 0) {
@@ -3254,6 +3391,19 @@ function ReviewWriteView({
       setServiceName(serviceNames[0]);
     }
   }, [serviceNames, serviceName]);
+
+  useEffect(() => {
+    if (!canSelectRequester) {
+      setSelectedRequesterId(currentRequesterId);
+      return;
+    }
+
+    if (selectedRequesterId && members.some((member) => member.id === selectedRequesterId)) {
+      return;
+    }
+
+    setSelectedRequesterId(currentRequesterId || members[0]?.id || '');
+  }, [canSelectRequester, currentRequesterId, members, selectedRequesterId]);
 
   const addLogFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
@@ -3301,13 +3451,13 @@ function ReviewWriteView({
 
   const canSubmitRequest =
     requestTitle.trim().length > 0 &&
-    currentRequesterName.trim().length > 0 &&
+    effectiveRequesterName.trim().length > 0 &&
     serviceName.trim().length > 0 &&
     logFiles.length > 0;
 
   const submitRequest = async () => {
     const title = requestTitle.trim();
-    const requester = currentRequesterName.trim();
+    const requester = effectiveRequesterName.trim();
     if (!title || !requester || !serviceName || logFiles.length === 0) {
       setRequestError('요청 제목, 요청자, 서비스명, 로그 파일을 모두 입력하세요.');
       return;
@@ -3315,7 +3465,8 @@ function ReviewWriteView({
 
     const result = await onSubmitRequest({
       title: requestTitle,
-      requesterName: currentRequesterName,
+      requesterId: canSelectRequester ? selectedRequesterId : currentRequesterId,
+      requesterName: requester,
       serviceName,
       logFiles,
     });
@@ -3361,10 +3512,28 @@ function ReviewWriteView({
           <div className="request-row">
             <div className="request-label">
               <strong className="text-14">요청자</strong>
-              <span className="text-12">로그인한 사용자 이름이 자동으로 들어갑니다</span>
+              <span className="text-12">{canSelectRequester ? '등록된 회원 중 요청자를 선택합니다' : '로그인한 사용자 이름이 자동으로 들어갑니다'}</span>
             </div>
             <div className="request-value">
-              <input className="text-12" value={currentRequesterName} readOnly disabled placeholder="로그인 사용자 이름" />
+              {canSelectRequester ? (
+                <select
+                  className="text-12"
+                  value={selectedRequesterId}
+                  onChange={(event) => setSelectedRequesterId(event.target.value)}
+                >
+                  {members.length === 0 ? (
+                    <option value={currentRequesterId}>{currentRequesterName || '회원 목록 없음'}</option>
+                  ) : (
+                    members.map((member) => (
+                      <option key={member.id} value={member.id}>
+                        {formatMemberRequesterName(member)}
+                      </option>
+                    ))
+                  )}
+                </select>
+              ) : (
+                <input className="text-12" value={currentRequesterName} readOnly disabled placeholder="로그인 사용자 이름" />
+              )}
             </div>
           </div>
 
@@ -3495,9 +3664,11 @@ function ReviewResultView({
   onRestartReview,
   onCompleteReview,
   onUpdateRequestCreatedAt,
+  onUpdateRequestRequester,
   onToggleRequestSelection,
   onRemoveSelectedRequests,
   onClearReviewGuide,
+  members,
 }: {
   requests: ReviewRequest[];
   selectedRequestId: string | null;
@@ -3514,8 +3685,10 @@ function ReviewResultView({
   onRestartReview: (requestId: string) => Promise<void>;
   onCompleteReview: (reviewText: string) => void;
   onUpdateRequestCreatedAt: (requestId: string, dateValue: string) => void;
+  onUpdateRequestRequester: (requestId: string, memberId: string) => void;
   onToggleRequestSelection: (requestId: string, checked: boolean) => void;
   onRemoveSelectedRequests: () => void;
+  members: Member[];
 }) {
   const [reviewResultText, setReviewResultText] = useState('');
   const [requestPage, setRequestPage] = useState(1);
@@ -3758,7 +3931,31 @@ function ReviewResultView({
                   <span className="text-12">{requestNumberByCreatedAt.get(request.id) ?? '-'}</span>
                   <span className="text-12">{request.service_name || '-'}</span>
                   <span className="text-12">{request.title}</span>
-                  <span className="text-12">{request.requester_name}</span>
+                  <span className="text-12">
+                    {isAdminRole(currentUserRole) ? (
+                      <select
+                        aria-label={`${request.title} 요청자`}
+                        className="request-date-input request-requester-select text-12"
+                        value={request.requester_id ?? ''}
+                        onChange={(event) => onUpdateRequestRequester(request.id, event.target.value)}
+                        onClick={(event) => event.stopPropagation()}
+                        onKeyDown={(event) => event.stopPropagation()}
+                      >
+                        {!request.requester_id && (
+                          <option value="" disabled>
+                            {request.requester_name || '요청자 선택'}
+                          </option>
+                        )}
+                        {members.map((member) => (
+                          <option key={member.id} value={member.id}>
+                            {formatMemberRequesterName(member)}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      request.requester_name
+                    )}
+                  </span>
                   <span className="text-12">
                     {isAdminRole(currentUserRole) ? (
                       <input
