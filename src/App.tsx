@@ -26,7 +26,21 @@ type ReviewFileSummary = {
   mimeType: string;
   size: number;
   previewText: string | null;
+  originalFileName?: string;
+  convertedFromLog?: boolean;
+  parsedToCsv?: boolean;
   storagePath?: string;
+};
+
+type ReviewAttachmentRow = {
+  id?: string;
+  request_id: string;
+  file_name: string;
+  mime_type: string | null;
+  storage_path: string;
+  originalFileName?: string;
+  convertedFromLog?: boolean;
+  parsedToCsv?: boolean;
 };
 
 type ReviewResultEntry = {
@@ -75,6 +89,9 @@ type ReviewUploadFile = {
   id: string;
   file: File;
   previewText: string | null;
+  originalFileName?: string;
+  convertedFromLog?: boolean;
+  parsedToCsv?: boolean;
 };
 
 type StoredReviewRequestBody = {
@@ -126,14 +143,15 @@ const accessByRole: Record<UserRole, ViewId[]> = {
 };
 
 const reviewPromptSlotCount = 10;
-const copyKillerReviewPromptIndex = 3;
 const reviewUploadBucket = 'review-uploads';
 const googleChatWebhookTable = 'lr_google_chat_webhooks';
 const reviewPromptTable = 'lr_review_prompt_settings';
 const reviewPromptScriptsTable = 'lr_review_prompt_scripts';
 const aiSettingsTable = 'lr_ai_settings';
 const sessionIdleTimeoutMs = 60 * 60 * 1000;
+const inputAutoSaveDelayMs = 3000;
 const sessionActivityStorageKey = 'log-review:last-activity-at';
+const profileRoleStorageKeyPrefix = 'log-review:profile-role';
 const isEndorphinAdminName = (name?: string | null) => name?.trim() === '엔돌핀';
 const defaultReviewPromptSlots = [
   [
@@ -156,8 +174,6 @@ const defaultReviewPromptSlots = [
 ];
 const defaultReviewPrompt = defaultReviewPromptSlots[0];
 const getDefaultReviewPromptSlot = (index: number) => defaultReviewPromptSlots[index] ?? '';
-const isCopyKillerService = (serviceName?: string | null) => serviceName?.trim() === '카피킬러';
-
 const getSessionUser = (
   session: {
     user: {
@@ -246,7 +262,30 @@ const formatDisplayNameWithUnit = (name?: string | null, unitName?: string | nul
 
 const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
 
-const splitWebhookMessage = (messageLines: string[], maxChars = 3000) => {
+const getUtf8ByteLength = (value: string) => new TextEncoder().encode(value).length;
+
+const splitTextByUtf8Bytes = (value: string, maxBytes: number) => {
+  const chunks: string[] = [];
+  let current = '';
+
+  for (const char of Array.from(value)) {
+    const next = `${current}${char}`;
+    if (current && getUtf8ByteLength(next) > maxBytes) {
+      chunks.push(current);
+      current = char;
+    } else {
+      current = next;
+    }
+  }
+
+  if (current) {
+    chunks.push(current);
+  }
+
+  return chunks;
+};
+
+const splitWebhookMessage = (messageLines: string[], maxBytes = 2400) => {
   const chunks: string[] = [];
   let current = '';
 
@@ -260,16 +299,14 @@ const splitWebhookMessage = (messageLines: string[], maxChars = 3000) => {
   for (const line of messageLines) {
     const normalizedLine = line ?? '';
 
-    if (normalizedLine.length > maxChars) {
+    if (getUtf8ByteLength(normalizedLine) > maxBytes) {
       pushChunk();
-      for (let index = 0; index < normalizedLine.length; index += maxChars) {
-        chunks.push(normalizedLine.slice(index, index + maxChars));
-      }
+      chunks.push(...splitTextByUtf8Bytes(normalizedLine, maxBytes));
       continue;
     }
 
     const next = current ? `${current}\n${normalizedLine}` : normalizedLine;
-    if (next.length > maxChars) {
+    if (getUtf8ByteLength(next) > maxBytes) {
       pushChunk();
       current = normalizedLine;
     } else {
@@ -524,6 +561,340 @@ const allowedLogExtensions = new Set(['log', 'csv', 'json', 'xlsx']);
 const textPreviewExtensions = new Set(['log', 'csv', 'json']);
 const xlsxPreviewMaxRowsPerSheet = 80;
 const xlsxPreviewMaxColumnsPerSheet = 16;
+
+const getFileExtension = (name: string) => name.split('.').pop()?.toLowerCase() ?? '';
+
+const replaceFileExtension = (name: string, extension: string) => {
+  const baseName = name.replace(/\.[^.]+$/, '') || 'log-file';
+  return `${baseName}.${extension}`;
+};
+
+const escapeCsvCell = (value: string | number) => `"${String(value).replace(/"/g, '""')}"`;
+
+const uniqueValues = (values: string[]) => Array.from(new Set(values.filter(Boolean)));
+
+const knownLogActions = [
+  'create log file',
+  'send 2fa mail',
+  'download summary excel',
+  'download applicant file',
+  'download monster video',
+  'download a file',
+  'delete pdf configuration',
+  'save download configure',
+  'add examinant to room',
+  'completed request',
+  'delete resume request',
+  'privacy & agreement',
+  'save request form',
+  'send email',
+  'update user',
+  'login',
+];
+
+const extractKnownLogAction = (message: string) => {
+  const normalized = message.toLowerCase();
+  return knownLogActions.find((action) => normalized.startsWith(action)) ?? '';
+};
+
+const parseLogLine = (line: string) => {
+  const dateMatch = line.match(/\b\d{4}[-/.]\s?\d{1,2}[-/.]\s?\d{1,2}\b/);
+  const timeMatch = line.match(/\b\d{2}:\d{2}:\d{2}(?:[.,]\d{1,6})?\b/);
+  const monthTimestampMatch = line.match(/\b[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\b/);
+  const levelMatch = line.match(/\b(TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL|CRITICAL)\b/i);
+  const bracketGroups = uniqueValues(line.match(/\[[^\]]+\]|\([^)]+\)|\{[^}]+\}|<[^>\s][^>]*>/g) ?? []);
+  const emails = uniqueValues(line.match(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi) ?? []);
+  const ipAddresses = uniqueValues(
+    line.match(/\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/g) ?? [],
+  );
+  const httpMethodMatch = line.match(/\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\b/);
+  const requestUriMatch = line.match(/https?:\/\/[^\s"'<>]+|\/[^\s"'<>]+/);
+  const explicitStatusMatch = line.match(/\b(?:status|status_code|code|sc-status)[=:\s]+([1-5]\d{2})\b/i);
+  const fallbackStatusMatch = line.match(/\s([1-5]\d{2})(?:\s|$)/);
+  const date = (dateMatch?.[0] ?? '').replace(/\s+/g, '');
+  const time = timeMatch?.[0] ?? '';
+  const timestamp = monthTimestampMatch?.[0] ?? [date, time].filter(Boolean).join(' ');
+  const level = levelMatch?.[0]?.toUpperCase() ?? '';
+  const requestUri = requestUriMatch?.[0]?.replace(/[),;]+$/, '') ?? '';
+  const statusCode = explicitStatusMatch?.[1] ?? fallbackStatusMatch?.[1] ?? '';
+  const service = line.match(/\[([^\]]+)\]/)?.[1] ?? '';
+  const message = line
+    .replace(timestamp, '')
+    .replace(date, '')
+    .replace(time, '')
+    .replace(levelMatch?.[0] ?? '', '')
+    .replace(/^[\s\-[\]():|]+/, '')
+    .trim();
+  const messageWithoutService = message.replace(/^\[[^\]]+\]\s*/, '').trim();
+  const action = extractKnownLogAction(messageWithoutService);
+  const details = action ? messageWithoutService.slice(action.length).replace(/^[\s:;-]+/, '').trim() : messageWithoutService;
+  const reason = details.match(/\breason:\s*(.*?)(?=\s+[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\s+\d{1,3}(?:\.\d{1,3}){3}\s*$|$)/i)?.[1]?.trim() ?? '';
+  const fileName =
+    details.match(/(?:download a file|download summary excel|download applicant file):\s*(.*?)(?:,\s*reason:|$)/i)?.[1]?.trim() ??
+    '';
+  const targetEmail =
+    action === 'send 2fa mail' || action === 'privacy & agreement'
+      ? emails[0] ?? ''
+      : action === 'update user'
+        ? emails[0] ?? ''
+        : '';
+  const actorEmail =
+    action === 'send 2fa mail' || action === 'privacy & agreement'
+      ? ''
+      : emails.length > 1
+        ? emails[emails.length - 1]
+        : action === 'login'
+          ? emails[0] ?? ''
+          : emails[emails.length - 1] ?? '';
+
+  return {
+    date,
+    time,
+    timestamp,
+    service,
+    level,
+    action,
+    targetEmail,
+    actorEmail,
+    ipAddresses: ipAddresses.join(' | '),
+    primaryIp: ipAddresses[0] ?? '',
+    emails: emails.join(' | '),
+    fileName,
+    reason,
+    httpMethod: httpMethodMatch?.[0] ?? '',
+    statusCode,
+    requestUri,
+    bracketGroups: bracketGroups.join(' | '),
+    message,
+    raw: line,
+  };
+};
+
+const convertLogFileToCsv = async (file: File) => {
+  const text = await file.text();
+  const rows = text.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  const header = [
+    'line_number',
+    'date',
+    'time',
+    'timestamp',
+    'service',
+    'level',
+    'action',
+    'target_email',
+    'actor_email',
+    'ip_addresses',
+    'primary_ip',
+    'emails',
+    'file_name',
+    'reason',
+    'http_method',
+    'status_code',
+    'request_uri',
+    'bracket_groups',
+    'message',
+    'raw',
+  ];
+  const csvRows = rows.map((line, index) => {
+    const parsed = parseLogLine(line);
+    return [
+      index + 1,
+      parsed.date,
+      parsed.time,
+      parsed.timestamp,
+      parsed.service,
+      parsed.level,
+      parsed.action,
+      parsed.targetEmail,
+      parsed.actorEmail,
+      parsed.ipAddresses,
+      parsed.primaryIp,
+      parsed.emails,
+      parsed.fileName,
+      parsed.reason,
+      parsed.httpMethod,
+      parsed.statusCode,
+      parsed.requestUri,
+      parsed.bracketGroups,
+      parsed.message,
+      parsed.raw,
+    ]
+      .map(escapeCsvCell)
+      .join(',');
+  });
+  const csvContent = `\uFEFF${[header.map(escapeCsvCell).join(','), ...csvRows].join('\n')}`;
+  const csvFileName = replaceFileExtension(file.name, 'csv');
+
+  return new File([csvContent], csvFileName, {
+    type: 'text/csv;charset=utf-8',
+    lastModified: file.lastModified,
+  });
+};
+
+const flattenJsonValue = (value: unknown, prefix = '', output: Record<string, string> = {}) => {
+  if (value === null || value === undefined) {
+    output[prefix || 'value'] = '';
+    return output;
+  }
+
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => flattenJsonValue(item, `${prefix}[${index}]`, output));
+    return output;
+  }
+
+  if (typeof value === 'object') {
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      flattenJsonValue(child, prefix ? `${prefix}.${key}` : key, output);
+    }
+    return output;
+  }
+
+  output[prefix || 'value'] = normalizeCellValue(value);
+  return output;
+};
+
+const rowsToCsvFile = (rows: Array<Record<string, string | number>>, fileName: string, lastModified: number) => {
+  const headers = Array.from(new Set(rows.flatMap((row) => Object.keys(row))));
+  const csvRows = rows.map((row) => headers.map((header) => escapeCsvCell(row[header] ?? '')).join(','));
+  const csvContent = `\uFEFF${[headers.map(escapeCsvCell).join(','), ...csvRows].join('\n')}`;
+
+  return new File([csvContent], replaceFileExtension(fileName, 'csv'), {
+    type: 'text/csv;charset=utf-8',
+    lastModified,
+  });
+};
+
+const convertJsonFileToCsv = async (file: File) => {
+  const parsed = JSON.parse(await file.text()) as unknown;
+  const sourceRows = Array.isArray(parsed) ? parsed : [parsed];
+  const rows = sourceRows.map((item, index) => ({
+    source_index: index + 1,
+    ...flattenJsonValue(item),
+  }));
+
+  return rowsToCsvFile(rows, file.name, file.lastModified);
+};
+
+const convertWorkbookFileToCsv = async (file: File) => {
+  const workbook = XLSX.read(await file.arrayBuffer(), {
+    type: 'array',
+    cellDates: true,
+  });
+  const rows: Array<Record<string, string | number>> = [];
+
+  for (const sheetName of workbook.SheetNames) {
+    const worksheet = workbook.Sheets[sheetName];
+    const sheetRows = XLSX.utils
+      .sheet_to_json<unknown[]>(worksheet, {
+        header: 1,
+        blankrows: false,
+        raw: false,
+      })
+      .map((row) => row.map(normalizeCellValue))
+      .filter((row) => row.some(Boolean));
+
+    if (sheetRows.length === 0) continue;
+
+    const header = sheetRows[0].map((cell, index) => cell || `column_${index + 1}`);
+    for (const [index, row] of sheetRows.slice(1).entries()) {
+      const parsedRow: Record<string, string | number> = {
+        source_sheet: sheetName,
+        row_number: index + 2,
+      };
+      header.forEach((columnName, columnIndex) => {
+        parsedRow[columnName] = row[columnIndex] ?? '';
+      });
+      rows.push(parsedRow);
+    }
+  }
+
+  return rowsToCsvFile(rows.length ? rows : [{ source_sheet: '-', row_number: 0 }], file.name, file.lastModified);
+};
+
+const convertUploadFileToParsedCsv = async (file: File) => {
+  const extension = getFileExtension(file.name);
+  if (extension === 'log') return convertLogFileToCsv(file);
+  if (extension === 'json') return convertJsonFileToCsv(file);
+  if (extension === 'xlsx') return convertWorkbookFileToCsv(file);
+  return file;
+};
+
+const getConvertedStoragePath = (storagePath: string, fileName: string) => {
+  if (/\.(log|json|xlsx)$/i.test(storagePath)) {
+    return storagePath.replace(/\.(log|json|xlsx)$/i, '.csv');
+  }
+
+  const slashIndex = storagePath.lastIndexOf('/');
+  const prefix = slashIndex >= 0 ? storagePath.slice(0, slashIndex + 1) : '';
+  const safeCsvName = sanitizeStorageFileName(replaceFileExtension(fileName, 'csv'));
+  return `${prefix}${safeCsvName}`;
+};
+
+const migrateStoredAttachmentToParsedCsv = async (attachment: ReviewAttachmentRow): Promise<ReviewAttachmentRow> => {
+  const extension = getFileExtension(attachment.file_name);
+  if (!['log', 'json', 'xlsx'].includes(extension) || !attachment.storage_path) {
+    return attachment;
+  }
+
+  try {
+    const { data, error } = await supabase.storage.from(reviewUploadBucket).download(attachment.storage_path);
+    if (error || !data) {
+      console.error('Legacy attachment download failed:', error?.message ?? 'Missing file data');
+      return attachment;
+    }
+
+    const originalFile = new File([data], attachment.file_name, {
+      type: attachment.mime_type || data.type || 'application/octet-stream',
+    });
+    const csvFile = await convertUploadFileToParsedCsv(originalFile);
+    const csvStoragePath = getConvertedStoragePath(attachment.storage_path, attachment.file_name);
+    const { error: uploadError } = await supabase.storage.from(reviewUploadBucket).upload(csvStoragePath, csvFile, {
+      contentType: csvFile.type || 'text/csv;charset=utf-8',
+      upsert: true,
+    });
+
+    if (uploadError) {
+      console.error('Legacy attachment CSV upload failed:', uploadError.message);
+      return attachment;
+    }
+
+    if (attachment.id) {
+      const { error: updateError } = await supabase
+        .from('lr_review_attachments')
+        .update({
+          file_name: csvFile.name,
+          mime_type: csvFile.type || 'text/csv;charset=utf-8',
+          storage_path: csvStoragePath,
+        })
+        .eq('id', attachment.id);
+
+      if (updateError) {
+        console.error('Legacy attachment metadata update failed:', updateError.message);
+        return attachment;
+      }
+    }
+
+    if (csvStoragePath !== attachment.storage_path) {
+      const { error: removeError } = await supabase.storage.from(reviewUploadBucket).remove([attachment.storage_path]);
+      if (removeError) {
+        console.warn('Legacy attachment source removal failed:', removeError.message);
+      }
+    }
+
+    return {
+      ...attachment,
+      file_name: csvFile.name,
+      mime_type: csvFile.type || 'text/csv;charset=utf-8',
+      storage_path: csvStoragePath,
+      originalFileName: attachment.file_name,
+      convertedFromLog: extension === 'log',
+      parsedToCsv: true,
+    };
+  } catch (error) {
+    console.error('Legacy attachment migration failed:', error);
+    return attachment;
+  }
+};
 
 const shouldPreviewFile = (file: File) => {
   const extension = file.name.split('.').pop()?.toLowerCase() ?? '';
@@ -791,6 +1162,22 @@ const loadAISettings = async () => {
 
 const getOAuthRedirectUrl = () => `${window.location.origin}${window.location.pathname}`;
 
+const getCachedProfileRole = (userId: string) => {
+  try {
+    return normalizeProfileRole(window.localStorage.getItem(`${profileRoleStorageKeyPrefix}:${userId}`));
+  } catch {
+    return 'requester';
+  }
+};
+
+const cacheProfileRole = (userId: string, role: UserRole) => {
+  try {
+    window.localStorage.setItem(`${profileRoleStorageKeyPrefix}:${userId}`, role);
+  } catch {
+    // Ignore storage failures; the database role remains the source of truth.
+  }
+};
+
 function App() {
   const [activeView, setActiveView] = useState<ViewId>('dashboard');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -812,6 +1199,7 @@ function App() {
   const [googleChatWebhookInput, setGoogleChatWebhookInput] = useState('');
   const [googleChatWebhookUrls, setGoogleChatWebhookUrls] = useState<string[]>([]);
   const [openAIApiKeyInput, setOpenAIApiKeyInput] = useState('');
+  const [openAIApiKeySaved, setOpenAIApiKeySaved] = useState(false);
   const [openAIModel, setOpenAIModel] = useState('gpt-4o-mini');
   const [members, setMembers] = useState<Member[]>([]);
   const [membersLoaded, setMembersLoaded] = useState(false);
@@ -828,6 +1216,7 @@ function App() {
   const reviewPromptSnapshotRef = useRef('');
   const currentUserUnitNameSnapshotRef = useRef('');
   const googleChatWebhookUrlsSnapshotRef = useRef<string[]>([]);
+  const openAIApiKeySnapshotRef = useRef('');
   const activeReviewPromptText = reviewPromptSlots[selectedReviewPromptIndex] ?? defaultReviewPrompt;
 
   const showSaveNotice = (kind: 'success' | 'error', message: string) => {
@@ -975,12 +1364,13 @@ function App() {
       return;
     }
 
+    const openAIApiKeyToSave = openAIApiKeyInput.trim() || openAIApiKeySnapshotRef.current;
     const { error } = await supabase
       .from(aiSettingsTable)
       .upsert(
         {
           id: 'default',
-          openai_api_key: openAIApiKeyInput.trim(),
+          openai_api_key: openAIApiKeyToSave,
           openai_model: openAIModel,
           updated_at: new Date().toISOString(),
         },
@@ -993,6 +1383,9 @@ function App() {
       return;
     }
 
+    openAIApiKeySnapshotRef.current = openAIApiKeyToSave;
+    setOpenAIApiKeySaved(Boolean(openAIApiKeyToSave));
+    setOpenAIApiKeyInput('');
     showSaveNotice('success', '저장 성공');
   };
 
@@ -1006,12 +1399,22 @@ function App() {
 
     supabase.auth.getSession().then(({ data }) => {
       if (!mounted) return;
-      setSessionUser(getSessionUser(data.session));
+      const nextUser = getSessionUser(data.session);
+      setSessionUser(nextUser);
+      if (nextUser) {
+        setCurrentProfileRole(getCachedProfileRole(nextUser.id));
+        setCurrentProfileLoaded(true);
+      }
       setLoadingAuth(false);
     });
 
     const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSessionUser(getSessionUser(session));
+      const nextUser = getSessionUser(session);
+      setSessionUser(nextUser);
+      if (nextUser) {
+        setCurrentProfileRole(getCachedProfileRole(nextUser.id));
+        setCurrentProfileLoaded(true);
+      }
     });
 
     return () => {
@@ -1100,8 +1503,6 @@ function App() {
         return;
       }
 
-      setCurrentProfileLoaded(false);
-
       const { data: existingProfile, error: selectError } = await supabase
         .from('lr_profiles')
         .select('id, role, unit_name')
@@ -1121,6 +1522,7 @@ function App() {
         setCurrentProfileRole(nextRole);
         setCurrentUserUnitName(nextUnitName);
         currentUserUnitNameSnapshotRef.current = nextUnitName;
+        cacheProfileRole(sessionUser.id, nextRole);
         setCurrentProfileLoaded(true);
       }
 
@@ -1161,6 +1563,8 @@ function App() {
         setCurrentUserUnitName('');
         setGoogleChatWebhookUrls([]);
         setGoogleChatWebhookInput('');
+        openAIApiKeySnapshotRef.current = '';
+        setOpenAIApiKeySaved(false);
         setOpenAIApiKeyInput('');
         setOpenAIModel('gpt-4o-mini');
         setReviewPromptSlots(defaultReviewPromptSlots);
@@ -1191,6 +1595,8 @@ function App() {
         setCurrentUserUnitName('');
         setGoogleChatWebhookUrls([]);
         setGoogleChatWebhookInput('');
+        openAIApiKeySnapshotRef.current = '';
+        setOpenAIApiKeySaved(false);
         setOpenAIApiKeyInput('');
         setOpenAIModel('gpt-4o-mini');
         setReviewPromptSlots(defaultReviewPromptSlots);
@@ -1223,12 +1629,12 @@ function App() {
 
       const currentProfile = (currentProfileData as ProfileSummary | null) ?? profileRows.find((profile) => profile.id === sessionUser.id) ?? null;
       const currentMember = fetchedMembers.find((member) => member.id === sessionUser.id) ?? null;
+      const nextCurrentRole = isEndorphinAdminName(sessionUser.name)
+        ? 'admin'
+        : currentMember?.role ?? normalizeProfileRole(currentProfile?.role);
       setCurrentUserUnitName(currentProfile?.unit_name ?? '');
-      setCurrentProfileRole(
-        isEndorphinAdminName(sessionUser.name)
-          ? 'admin'
-          : currentMember?.role ?? normalizeProfileRole(currentProfile?.role),
-      );
+      setCurrentProfileRole(nextCurrentRole);
+      cacheProfileRole(sessionUser.id, nextCurrentRole);
       setCurrentProfileLoaded(true);
       currentUserUnitNameSnapshotRef.current = currentProfile?.unit_name ?? '';
       setMembers(fetchedMembers);
@@ -1272,10 +1678,14 @@ function App() {
 
       try {
         const aiSettings = await loadAISettings();
-        setOpenAIApiKeyInput(aiSettings.openaiApiKey);
+        openAIApiKeySnapshotRef.current = aiSettings.openaiApiKey;
+        setOpenAIApiKeySaved(Boolean(aiSettings.openaiApiKey));
+        setOpenAIApiKeyInput('');
         setOpenAIModel(aiSettings.openaiModel);
       } catch (error) {
         console.error('Failed to load OpenAI settings:', error);
+        openAIApiKeySnapshotRef.current = '';
+        setOpenAIApiKeySaved(false);
         setOpenAIApiKeyInput('');
         setOpenAIModel('gpt-4o-mini');
       }
@@ -1386,7 +1796,7 @@ function App() {
         reviewPromptSnapshotRef.current = nextSnapshot;
         showSaveNotice('success', '저장 성공');
       })();
-    }, 400);
+    }, inputAutoSaveDelayMs);
 
     return () => window.clearTimeout(timer);
   }, [activeReviewPromptText, currentProfileRole, reviewPromptLoaded, reviewPromptSlots, selectedReviewPromptIndex, sessionUser]);
@@ -1423,7 +1833,7 @@ function App() {
       const { data: attachmentData, error: attachmentError } = requestIds.length
         ? await supabase
             .from('lr_review_attachments')
-            .select('request_id, file_name, mime_type, storage_path')
+            .select('id, request_id, file_name, mime_type, storage_path')
             .in('request_id', requestIds)
         : { data: [], error: null };
 
@@ -1431,9 +1841,12 @@ function App() {
         console.error('Failed to load review attachments:', attachmentError.message);
       }
 
+      const migratedAttachmentData = await Promise.all(
+        ((attachmentData ?? []) as ReviewAttachmentRow[]).map((attachment) => migrateStoredAttachmentToParsedCsv(attachment)),
+      );
       const attachmentCounts = new Map<string, number>();
       const attachmentSummaries = new Map<string, ReviewFileSummary[]>();
-      for (const attachment of attachmentData ?? []) {
+      for (const attachment of migratedAttachmentData) {
         attachmentCounts.set(attachment.request_id, (attachmentCounts.get(attachment.request_id) ?? 0) + 1);
         const parsedSummary: ReviewFileSummary = {
           fileName: attachment.file_name,
@@ -1441,6 +1854,9 @@ function App() {
           mimeType: attachment.mime_type ?? '',
           size: 0,
           previewText: null,
+          originalFileName: attachment.originalFileName,
+          convertedFromLog: attachment.convertedFromLog,
+          parsedToCsv: attachment.parsedToCsv,
           storagePath: attachment.storage_path,
         };
         const currentSummaries = attachmentSummaries.get(attachment.request_id) ?? [];
@@ -1504,7 +1920,7 @@ function App() {
         currentUserUnitNameSnapshotRef.current = currentUserUnitName;
         showSaveNotice('success', '저장 성공');
       })();
-    }, 400);
+    }, inputAutoSaveDelayMs);
 
     return () => window.clearTimeout(timer);
   }, [currentUserUnitName, membersLoaded, sessionUser]);
@@ -1662,6 +2078,9 @@ function App() {
       mimeType: entry.file.type,
       size: entry.file.size,
       previewText: entry.previewText,
+      originalFileName: entry.originalFileName,
+      convertedFromLog: entry.convertedFromLog,
+      parsedToCsv: entry.parsedToCsv,
     }));
 
     const requestBody = JSON.stringify({
@@ -1725,6 +2144,14 @@ function App() {
         }
       }
 
+      const uploadedFileSummaries = fileSummaries.map((summary) => {
+        const uploadedFile = uploadedFiles.find((file) => file.file_name === summary.fileName);
+        return {
+          ...summary,
+          storagePath: uploadedFile?.storage_path,
+        };
+      });
+
       const webhookSent = await sendWebhookNotifications([
         '검토 요청이 등록되었습니다.',
         `제목: ${title}`,
@@ -1748,7 +2175,7 @@ function App() {
         service_name: serviceName,
         log_file_count: uploadedFiles.length,
         request_body: requestBody,
-        file_summaries: fileSummaries,
+        file_summaries: uploadedFileSummaries,
         status: 'submitted',
         request_created_at: requestRow.request_created_at,
         created_at: new Date().toISOString(),
@@ -1801,13 +2228,10 @@ function App() {
     }, 180);
 
     try {
-      const openAISettings = { apiKey: openAIApiKeyInput, model: openAIModel };
+      const openAISettings = { apiKey: openAIApiKeyInput.trim() || openAIApiKeySnapshotRef.current, model: openAIModel };
 
       if (isOpenAIConfigured(openAISettings)) {
-        const effectivePromptIndex = isCopyKillerService(request.service_name)
-          ? copyKillerReviewPromptIndex
-          : selectedReviewPromptIndex;
-        const effectivePromptText = reviewPromptSlots[effectivePromptIndex] ?? defaultReviewPrompt;
+        const effectivePromptText = reviewPromptSlots[selectedReviewPromptIndex] ?? defaultReviewPrompt;
         const attachments = await loadAttachmentPreviews(request.file_summaries ?? []);
         const guide = await generateReviewGuide({
           serviceName: request.service_name,
@@ -1833,6 +2257,35 @@ function App() {
       setReviewGuideLoading(false);
       window.setTimeout(() => setReviewGuideProgress(0), 300);
     }
+  };
+
+  const restartReview = async (requestId: string) => {
+    if (!isReviewerOrAbove(currentUserRole)) return;
+
+    const request = requests.find((item) => item.id === requestId);
+    if (!request || request.status !== 'done') return;
+
+    setReviewGuideText('');
+    setReviewGuideError(null);
+    setSelectedRequestId(requestId);
+
+    if (isSupabaseConfigured && sessionUser) {
+      const { error } = await supabase
+        .from('lr_review_requests')
+        .update({ status: 'in_review' })
+        .eq('id', requestId);
+
+      if (error) {
+        console.error('Review restart failed:', error.message);
+        showSaveNotice('error', '재검토 상태 변경 실패');
+        return;
+      }
+    }
+
+    setRequests((current) =>
+      current.map((item) => (item.id === requestId ? { ...item, status: 'in_review' } : item)),
+    );
+    await startReview(requestId);
   };
 
   const completeReview = (reviewText: string) => {
@@ -2264,6 +2717,14 @@ function App() {
           >
             <span className="text-12">{sidebarCollapsed ? '>' : '<'}</span>
           </button>
+          <button
+            className="mobile-auth-btn primary-btn text-12"
+            onClick={sessionUser ? logout : login}
+            disabled={!sessionUser && !isSupabaseConfigured}
+            type="button"
+          >
+            {sessionUser ? '로그아웃' : '로그인'}
+          </button>
         </div>
 
         <nav className="nav">
@@ -2339,27 +2800,10 @@ function App() {
         </header>
 
         {!isAuthenticated && activeView === 'dashboard' ? (
-          <>
-            <div className="hero-banner">
-              <div className="hero-row">
-                <span className="text-14">상태 알림</span>
-                <strong className="text-14">로그인 후 로그 검토 요청과 분석 결과를 관리할 수 있습니다.</strong>
-              </div>
-              <p className="text-14">대시보드는 공개 상태로 표시되며, 다른 메뉴는 로그인 후 권한에 따라 활성화됩니다.</p>
-            </div>
-            <Dashboard stats={stats} recent={requests} onNavigate={setActiveView} canNavigate={false} />
-          </>
+          <Dashboard stats={stats} recent={requests} onNavigate={setActiveView} canNavigate={false} />
         ) : isAuthenticated ? (
           isRoleResolved ? (
           <>
-            <div className="hero-banner">
-              <div className="hero-row">
-                <span className="text-14">상태 알림</span>
-                <strong className="text-14">로그 검토 요청과 분석 결과를 한 화면에서 관리합니다.</strong>
-              </div>
-              <p className="text-14">로그 파일, 분석 결과, 이력, 권한을 하나의 작업 공간에서 관리합니다.</p>
-            </div>
-
             {activeView === 'dashboard' && <Dashboard stats={stats} recent={requests} onNavigate={setActiveView} canNavigate />}
             {activeView === 'review-write' && (
               <ReviewWriteView
@@ -2390,6 +2834,7 @@ function App() {
                   setReviewGuideError(null);
                 }}
                 onStartReview={startReview}
+                onRestartReview={restartReview}
                 onCompleteReview={completeReview}
                 currentUserRole={currentUserRole}
                 selectedRequestIds={selectedRequestIds}
@@ -2426,6 +2871,7 @@ function App() {
                 googleChatWebhookInput={googleChatWebhookInput}
                 googleChatWebhookUrls={googleChatWebhookUrls}
                 openAIApiKeyInput={openAIApiKeyInput}
+                openAIApiKeySaved={openAIApiKeySaved}
                 onChangeCurrentUserUnitName={setCurrentUserUnitName}
                 onChangeGoogleChatWebhookInput={setGoogleChatWebhookInput}
                 onChangeOpenAIApiKeyInput={setOpenAIApiKeyInput}
@@ -2537,10 +2983,26 @@ function Dashboard({
     { label: '진행', value: String(stats.inReview), targetView: 'review-result' },
     { label: '완료', value: String(stats.done), targetView: 'result-log' },
   ];
+  const calendarYear = recent[0] ? getKoreaDateParts(getDashboardCreatedAt(recent[0])).year : getKoreaDateParts(new Date()).year;
+  const monthlyHistory = Array.from({ length: 12 }, (_item, index) => {
+    const month = String(index + 1).padStart(2, '0');
+    const monthRequests = recent.filter((request) => {
+      const parts = getKoreaDateParts(getDashboardCreatedAt(request));
+      return parts.year === calendarYear && parts.month === month;
+    });
+
+    return {
+      month,
+      total: monthRequests.length,
+      submitted: monthRequests.filter((request) => request.status === 'submitted').length,
+      inReview: monthRequests.filter((request) => request.status === 'in_review').length,
+      done: monthRequests.filter((request) => request.status === 'done').length,
+    };
+  });
 
   return (
     <section className="workspace review-result-workspace">
-      <article className="detail-card dense-card">
+      <article className="detail-card dense-card review-queue-panel">
         <div className="detail-header compact">
           <div>
             <h2 className="text-14">Review Queue</h2>
@@ -2549,7 +3011,7 @@ function Dashboard({
               <span className="text-12">Active workspace</span>
             </div>
           </div>
-          <button className="secondary-btn text-12" type="button">
+          <button className="secondary-btn text-12 queue-refresh-btn" type="button">
             <span className="text-12">Refresh</span>
           </button>
         </div>
@@ -2569,6 +3031,29 @@ function Dashboard({
             </button>
           ))}
         </div>
+
+        <div className="queue-calendar">
+          <div className="queue-calendar-header">
+            <strong className="text-14">{calendarYear} 월별 검토 이력</strong>
+          </div>
+          <div className="queue-calendar-grid" aria-label={`${calendarYear} 월별 검토 이력`}>
+            {monthlyHistory.map((item) => (
+              <div className={`queue-month ${item.total > 0 ? 'has-history' : ''}`} key={item.month}>
+                <span className="queue-month-name text-12">{Number(item.month)}월</span>
+                <strong className="queue-month-total text-14">{item.total}</strong>
+                <div className="queue-month-bars" aria-hidden="true">
+                  <span className="queue-month-bar done" style={{ flexGrow: item.done || 0 }} />
+                  <span className="queue-month-bar in-review" style={{ flexGrow: item.inReview || 0 }} />
+                  <span className="queue-month-bar submitted" style={{ flexGrow: item.submitted || 0 }} />
+                  {item.total === 0 && <span className="queue-month-bar empty" />}
+                </div>
+                <span className="queue-month-status text-12">
+                  완료 {item.done} · 진행 {item.inReview} · 대기 {item.submitted}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
       </article>
 
       <article className="detail-card permissions-card">
@@ -2576,7 +3061,7 @@ function Dashboard({
           <h3 className="text-14">Recent requests</h3>
           <span className="text-12">{recent.length} items</span>
         </div>
-        <div className="table-card dense-table">
+        <div className="table-card dense-table recent-requests-table">
           <div className="table">
             <div className="table-row table-head recent-head">
               <span className="text-13">Title</span>
@@ -2585,7 +3070,7 @@ function Dashboard({
               <span className="text-13">Created</span>
             </div>
             {recent.map((item) => (
-              <div className="table-row" key={item.id}>
+              <div className="table-row recent-row" key={item.id}>
                 <span className="text-12 table-cell-center">{item.title}</span>
                 <span className="text-12 table-cell-center">{item.requester_name}</span>
                 <span className={`pill ${item.status} text-12 table-cell-center`}>{item.status}</span>
@@ -2644,11 +3129,19 @@ function ReviewWriteView({
     }
 
     const nextFiles = await Promise.all(
-      acceptedFiles.map(async (file) => ({
-        id: `${file.name}-${file.size}-${file.lastModified}`,
-        file,
-        previewText: await buildFilePreview(file),
-      })),
+      acceptedFiles.map(async (file) => {
+        const extension = getFileExtension(file.name);
+        const storedFile = await convertUploadFileToParsedCsv(file);
+        const parsedToCsv = ['log', 'json', 'xlsx'].includes(extension);
+        return {
+          id: `${storedFile.name}-${storedFile.size}-${storedFile.lastModified}`,
+          file: storedFile,
+          previewText: await buildFilePreview(storedFile),
+          originalFileName: parsedToCsv ? file.name : undefined,
+          convertedFromLog: extension === 'log',
+          parsedToCsv,
+        };
+      }),
     );
 
     setLogFiles((current) => {
@@ -2789,7 +3282,11 @@ function ReviewWriteView({
                 {logFiles.length > 0 ? (
                   logFiles.map((entry) => (
                     <div className="file-row" key={entry.id}>
-                      <span className="text-12">{entry.file.name}</span>
+                      <span className="text-12">
+                        {entry.parsedToCsv && entry.originalFileName
+                          ? `${entry.originalFileName} -> ${entry.file.name}`
+                          : entry.file.name}
+                      </span>
                     </div>
                   ))
               ) : null}
@@ -2856,6 +3353,7 @@ function ReviewResultView({
   selectedRequestIds,
   onSelectRequest,
   onStartReview,
+  onRestartReview,
   onCompleteReview,
   onUpdateRequestCreatedAt,
   onToggleRequestSelection,
@@ -2874,6 +3372,7 @@ function ReviewResultView({
   onSelectRequest: (requestId: string | null) => void;
   onClearReviewGuide: () => void;
   onStartReview: (requestId: string) => Promise<void>;
+  onRestartReview: (requestId: string) => Promise<void>;
   onCompleteReview: (reviewText: string) => void;
   onUpdateRequestCreatedAt: (requestId: string, dateValue: string) => void;
   onToggleRequestSelection: (requestId: string, checked: boolean) => void;
@@ -2881,6 +3380,14 @@ function ReviewResultView({
 }) {
   const [reviewResultText, setReviewResultText] = useState('');
   const [requestPage, setRequestPage] = useState(1);
+  const [downloadingFileKey, setDownloadingFileKey] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [csvPreview, setCsvPreview] = useState<{
+    fileName: string;
+    blob: Blob;
+    previewText: string;
+    isTruncated: boolean;
+  } | null>(null);
   const reviewResultEditorRef = useRef<HTMLDivElement | null>(null);
   const requestsPerPage = 10;
   const requestPageCount = Math.max(1, Math.ceil(requests.length / requestsPerPage));
@@ -2888,8 +3395,25 @@ function ReviewResultView({
     () => requests.slice((requestPage - 1) * requestsPerPage, requestPage * requestsPerPage),
     [requestPage, requests],
   );
+  const requestNumberByCreatedAt = useMemo(() => {
+    const sortedRequests = [...requests].sort((first, second) => {
+      const firstRequestTime = new Date(first.request_created_at || first.created_at).getTime();
+      const secondRequestTime = new Date(second.request_created_at || second.created_at).getTime();
+      const firstTime = Number.isNaN(firstRequestTime) ? 0 : firstRequestTime;
+      const secondTime = Number.isNaN(secondRequestTime) ? 0 : secondRequestTime;
+      if (firstTime !== secondTime) return firstTime - secondTime;
+
+      const firstCreatedTime = new Date(first.created_at).getTime();
+      const secondCreatedTime = new Date(second.created_at).getTime();
+      return (Number.isNaN(firstCreatedTime) ? 0 : firstCreatedTime) - (Number.isNaN(secondCreatedTime) ? 0 : secondCreatedTime);
+    });
+
+    return new Map(sortedRequests.map((request, index) => [request.id, index + 1]));
+  }, [requests]);
   const selectedRequest = requests.find((request) => request.id === selectedRequestId) ?? null;
   const canDeleteRequests = isReviewerOrAbove(currentUserRole);
+  const canDownloadAttachments = isReviewerOrAbove(currentUserRole);
+  const selectedAttachments = selectedRequest?.file_summaries ?? [];
   const parsedReviewGuideRows = useMemo(
     () => (reviewGuideText ? parseReviewGuideTable(reviewGuideText) : null),
     [reviewGuideText],
@@ -2944,6 +3468,12 @@ function ReviewResultView({
     void onStartReview(requestId);
   };
 
+  const handleRestartReview = (event: React.MouseEvent<HTMLButtonElement>, requestId: string) => {
+    event.stopPropagation();
+    setReviewResultText('');
+    void onRestartReview(requestId);
+  };
+
   const handleCompleteReview = () => {
     const trimmed = reviewResultText.trim();
     if (!trimmed) return;
@@ -2961,7 +3491,64 @@ function ReviewResultView({
     document.execCommand('insertText', false, text);
   };
 
+  const downloadCsvPreview = () => {
+    if (!csvPreview) return;
+
+    const url = URL.createObjectURL(csvPreview.blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = csvPreview.fileName;
+    link.rel = 'noopener';
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+    window.setTimeout(() => {
+      link.remove();
+      URL.revokeObjectURL(url);
+    }, 1000);
+  };
+
+  const handlePreviewAttachment = async (attachment: ReviewFileSummary, fileKey: string) => {
+    if (!canDownloadAttachments || !attachment.storagePath) return;
+
+    setDownloadError(null);
+    setDownloadingFileKey(fileKey);
+
+    try {
+      const { data, error } = await supabase.storage.from(reviewUploadBucket).download(attachment.storagePath);
+      if (error || !data) {
+        throw new Error(error?.message ?? '파일을 불러오지 못했습니다.');
+      }
+
+      let downloadBlob: Blob = data;
+      let downloadFileName = attachment.fileName || 'log-file.csv';
+      const extension = getFileExtension(downloadFileName);
+      if (['log', 'json', 'xlsx'].includes(extension)) {
+        const sourceFile = new File([data], downloadFileName, {
+          type: attachment.mimeType || data.type || 'application/octet-stream',
+        });
+        const csvFile = await convertUploadFileToParsedCsv(sourceFile);
+        downloadBlob = csvFile;
+        downloadFileName = csvFile.name;
+      }
+
+      const previewSliceSize = 280 * 1024;
+      const previewText = await downloadBlob.slice(0, previewSliceSize).text();
+      setCsvPreview({
+        fileName: downloadFileName,
+        blob: downloadBlob,
+        previewText,
+        isTruncated: downloadBlob.size > previewSliceSize,
+      });
+    } catch (error) {
+      setDownloadError(error instanceof Error ? error.message : '파싱 CSV 미리보기를 불러오지 못했습니다.');
+    } finally {
+      setDownloadingFileKey(null);
+    }
+  };
+
   return (
+    <>
     <section className="workspace">
       <article className="detail-card">
         <div className="detail-header compact">
@@ -2998,7 +3585,7 @@ function ReviewResultView({
             {requests.length === 0 ? (
               <div className="empty-state">아직 검토 요청이 없습니다.</div>
             ) : (
-              pagedRequests.map((request, index) => (
+              pagedRequests.map((request) => (
                 <div
                   key={request.id}
                   className={`table-row result-entry-row request-queue-row ${request.id === selectedRequestId ? 'active' : ''}`}
@@ -3027,7 +3614,7 @@ function ReviewResultView({
                       '-'
                     )}
                   </span>
-                  <span className="text-12">{(requestPage - 1) * requestsPerPage + index + 1}</span>
+                  <span className="text-12">{requestNumberByCreatedAt.get(request.id) ?? '-'}</span>
                   <span className="text-12">{request.service_name || '-'}</span>
                   <span className="text-12">{request.title}</span>
                   <span className="text-12">{request.requester_name}</span>
@@ -3048,8 +3635,19 @@ function ReviewResultView({
                   </span>
                   <span className="text-12">{request.log_file_count}</span>
                   <span className={`text-12 queue-status ${request.status}`}>
-                    <span className="queue-status-dot" aria-hidden="true" />
-                    <span>{request.status === 'done' ? '완료' : request.status === 'in_review' ? '진행' : '대기'}</span>
+                    <span className="queue-status-main">
+                      <span className="queue-status-dot" aria-hidden="true" />
+                      <span>{request.status === 'done' ? '완료' : request.status === 'in_review' ? '진행' : '대기'}</span>
+                    </span>
+                    {request.status === 'done' && isReviewerOrAbove(currentUserRole) && (
+                      <button
+                        className="secondary-btn text-12 rereview-btn"
+                        type="button"
+                        onClick={(event) => handleRestartReview(event, request.id)}
+                      >
+                        재검토
+                      </button>
+                    )}
                   </span>
                 </div>
               ))
@@ -3142,6 +3740,35 @@ function ReviewResultView({
                 {selectedRequest?.service_name || '-'}
               </span>
             </div>
+            <div className="table-row result-entry-row">
+              <span className="text-12 result-entry-label-cell">파싱 CSV</span>
+              <div className="result-entry-value result-entry-readonly attachment-download-list">
+                {selectedAttachments.length === 0 ? (
+                  <span className="text-12">-</span>
+                ) : (
+                  selectedAttachments.map((file, index) => {
+                    const fileKey = `${selectedRequest?.id ?? 'request'}-${file.storagePath ?? file.fileName}-${index}`;
+                    const isDownloading = downloadingFileKey === fileKey;
+                    const downloadFileName = file.parsedToCsv || ['log', 'json', 'xlsx'].includes(getFileExtension(file.fileName))
+                      ? replaceFileExtension(file.fileName, 'csv')
+                      : file.fileName;
+                    return (
+                      <button
+                        key={fileKey}
+                        className="secondary-btn text-12 attachment-download-btn"
+                        type="button"
+                        onClick={() => void handlePreviewAttachment(file, fileKey)}
+                        disabled={!canDownloadAttachments || !file.storagePath || isDownloading}
+                        title={file.storagePath ? `${downloadFileName} 미리보기` : '저장 경로가 없어 미리볼 수 없습니다'}
+                      >
+                        <span className="text-12">{isDownloading ? '불러오는 중...' : `${downloadFileName} 미리보기`}</span>
+                      </button>
+                    );
+                  })
+                )}
+                {downloadError && <span className="text-12 attachment-download-error">{downloadError}</span>}
+              </div>
+            </div>
             <div className="table-row result-entry-row result-entry-text-row">
               <span className="text-12 result-entry-label-cell">검토 결과</span>
               <div className="result-entry-editor-shell">
@@ -3180,6 +3807,41 @@ function ReviewResultView({
         </div>
       </article>
     </section>
+    {csvPreview && (
+      <div
+        className="csv-preview-overlay"
+        role="presentation"
+        onClick={() => setCsvPreview(null)}
+      >
+        <div
+          className="csv-preview-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="csv-preview-title"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div className="csv-preview-header">
+            <div>
+              <h3 id="csv-preview-title" className="text-14">파싱 CSV 미리보기</h3>
+              <span className="text-12">{csvPreview.fileName}</span>
+            </div>
+            <div className="csv-preview-actions">
+              <button className="primary-btn text-12" type="button" onClick={downloadCsvPreview}>
+                <span className="text-12">다운로드</span>
+              </button>
+              <button className="secondary-btn text-12" type="button" onClick={() => setCsvPreview(null)}>
+                <span className="text-12">닫기</span>
+              </button>
+            </div>
+          </div>
+          {csvPreview.isTruncated && (
+            <div className="csv-preview-note text-12">파일이 커서 앞부분만 미리보기로 표시합니다. 다운로드는 전체 CSV 파일로 받습니다.</div>
+          )}
+          <pre className="csv-preview-body text-12">{csvPreview.previewText || '미리볼 내용이 없습니다.'}</pre>
+        </div>
+      </div>
+    )}
+    </>
   );
 }
 
@@ -3200,6 +3862,10 @@ function ResultLogView({
 }) {
   const [resultPage, setResultPage] = useState(1);
   const [resultServiceFilter, setResultServiceFilter] = useState('all');
+  const [selectedResultDetail, setSelectedResultDetail] = useState<{
+    result: ReviewResultEntry;
+    number: number;
+  } | null>(null);
   const resultsPerPage = 15;
   const resultServiceOptions = useMemo(
     () =>
@@ -3242,95 +3908,9 @@ function ResultLogView({
     [filteredResults],
   );
 
-  const handlePrintPdf = () => {
-    const rowsHtml = csvRows
-      .map(
-        (row) => `
-          <tr>
-            <td>${escapeHtml(row.number)}</td>
-            <td>${escapeHtml(row.requestCreatedAt)}</td>
-            <td>${escapeHtml(row.completedAt)}</td>
-            <td>${escapeHtml(row.serviceName)}</td>
-            <td>${escapeHtml(row.requesterName)}</td>
-            <td>${escapeHtml(row.reviewerName)}</td>
-            <td>${escapeHtml(row.resultText)
-              .split(/\r?\n/)
-              .join('<br />')}</td>
-          </tr>
-        `,
-      )
-      .join('');
-
-    const printHtml = `
-      <!doctype html>
-      <html lang="ko">
-        <head>
-          <meta charset="utf-8" />
-          <title>Result Log PDF</title>
-          <style>
-            body {
-              margin: 24px;
-              font-family: 'Korpub돋움체', 'KorPub Dotum', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
-              color: #172033;
-            }
-            @page {
-              size: A4 landscape;
-              margin: 12mm;
-            }
-            h1 {
-              margin: 0 0 16px;
-              font-size: 20px;
-            }
-            table {
-              width: 100%;
-              border-collapse: collapse;
-              table-layout: fixed;
-            }
-            th, td {
-              border: 1px solid #d8dee8;
-              padding: 10px 12px;
-              vertical-align: top;
-              font-size: 13px;
-              line-height: 1.5;
-            }
-            th {
-              background: #f5f7fb;
-              text-align: center;
-              white-space: nowrap;
-            }
-            td {
-              text-align: center;
-              white-space: nowrap;
-            }
-            td:last-child {
-              text-align: left;
-              white-space: pre-wrap;
-              word-break: break-word;
-            }
-          </style>
-        </head>
-        <body>
-          <h1>결과 로그</h1>
-          <table>
-            <thead>
-              <tr>
-                <th>번호</th>
-                <th>검토 요청일</th>
-                <th>검토 완료일</th>
-                <th>서비스</th>
-                <th>요청자</th>
-                <th>검토자</th>
-                <th>검토 결과</th>
-              </tr>
-            </thead>
-            <tbody>${rowsHtml}</tbody>
-          </table>
-        </body>
-      </html>
-    `;
-
+  const openPrintWindow = (printHtml: string, title: string) => {
     const iframe = document.createElement('iframe');
-    iframe.title = '결과 로그 PDF 출력';
+    iframe.title = title;
     iframe.style.position = 'fixed';
     iframe.style.right = '0';
     iframe.style.bottom = '0';
@@ -3350,20 +3930,137 @@ function ResultLogView({
     printDocument.write(printHtml);
     printDocument.close();
 
-    iframe.onload = () => {
+    let printed = false;
+    const printOnce = () => {
+      if (printed || !document.body.contains(iframe)) {
+        return;
+      }
+      printed = true;
       iframe.contentWindow?.focus();
       iframe.contentWindow?.print();
       window.setTimeout(() => iframe.remove(), 1000);
     };
 
-    window.setTimeout(() => {
-      if (!document.body.contains(iframe)) {
-        return;
-      }
-      iframe.contentWindow?.focus();
-      iframe.contentWindow?.print();
-      window.setTimeout(() => iframe.remove(), 1000);
-    }, 500);
+    iframe.onload = printOnce;
+    window.setTimeout(printOnce, 500);
+  };
+
+  const buildResultRowsHtml = (rows: typeof csvRows) =>
+    rows
+      .map(
+        (row) => `
+          <tr>
+            <td>${escapeHtml(row.number)}</td>
+            <td>${escapeHtml(row.requestCreatedAt)}</td>
+            <td>${escapeHtml(row.completedAt)}</td>
+            <td>${escapeHtml(row.serviceName)}</td>
+            <td>${escapeHtml(row.requesterName)}</td>
+            <td>${escapeHtml(row.reviewerName)}</td>
+            <td>${escapeHtml(row.resultText)
+              .split(/\r?\n/)
+              .join('<br />')}</td>
+          </tr>
+        `,
+      )
+      .join('');
+
+  const buildResultPrintHtml = (rows: typeof csvRows, title: string, pageSize = 'A4 portrait') => {
+    const rowsHtml = buildResultRowsHtml(rows);
+    return `
+      <!doctype html>
+      <html lang="ko">
+        <head>
+          <meta charset="utf-8" />
+          <title>${escapeHtml(title)}</title>
+          <style>
+            body {
+              margin: 12px;
+              font-family: 'Korpub돋움체', 'KorPub Dotum', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
+              color: #172033;
+            }
+            @page {
+              size: ${pageSize};
+              margin: 8mm;
+            }
+            h1 {
+              margin: 0 0 10px;
+              font-size: 15px;
+            }
+            table {
+              width: 100%;
+              border-collapse: collapse;
+              table-layout: fixed;
+            }
+            th, td {
+              border: 1px solid #d8dee8;
+              padding: 5px 6px;
+              vertical-align: middle;
+              font-size: 8px;
+              line-height: 1.35;
+            }
+            th {
+              background: #f5f7fb;
+              text-align: center;
+              white-space: nowrap;
+            }
+            td {
+              text-align: center;
+              white-space: nowrap;
+            }
+            td:last-child {
+              text-align: left;
+              white-space: pre-wrap;
+              word-break: break-word;
+            }
+          </style>
+        </head>
+        <body>
+          <h1>${escapeHtml(title)}</h1>
+          <table>
+            <thead>
+              <tr>
+                <th>번호</th>
+                <th>검토 요청일</th>
+                <th>검토 완료일</th>
+                <th>서비스</th>
+                <th>요청자</th>
+                <th>검토자</th>
+                <th>검토 결과</th>
+              </tr>
+            </thead>
+            <tbody>${rowsHtml}</tbody>
+          </table>
+        </body>
+      </html>
+    `;
+  };
+
+  const handlePrintPdf = () => {
+    openPrintWindow(buildResultPrintHtml(csvRows, '결과 로그'), '결과 로그 PDF 출력');
+  };
+
+  const handlePrintSelectedResultPdf = () => {
+    if (!selectedResultDetail) return;
+
+    const { result, number } = selectedResultDetail;
+    openPrintWindow(
+      buildResultPrintHtml(
+        [
+          {
+            number,
+            requestCreatedAt: result.requestCreatedAt || '-',
+            completedAt: result.completedAt,
+            serviceName: result.serviceName || '-',
+            requesterName: result.requesterName || '-',
+            reviewerName: result.reviewerName,
+            resultText: result.resultText,
+          },
+        ],
+        '결과 로그 상세',
+        'A4 portrait',
+      ),
+      '결과 로그 상세 PDF 다운로드',
+    );
   };
 
   const handleExportCsv = () => {
@@ -3473,8 +4170,22 @@ function ResultLogView({
                       </td>
                     </tr>
                   ) : (
-                    pagedResults.map((result, index) => (
-                      <tr key={result.id}>
+                    pagedResults.map((result, index) => {
+                      const resultNumber = filteredResults.length - ((resultPage - 1) * resultsPerPage + index);
+                      return (
+                      <tr
+                        key={result.id}
+                        className="result-log-clickable-row"
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => setSelectedResultDetail({ result, number: resultNumber })}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault();
+                            setSelectedResultDetail({ result, number: resultNumber });
+                          }
+                        }}
+                      >
                         {currentUserRole === 'admin' && (
                           <td className="text-12 result-log-id-cell result-log-select-col">
                             <input
@@ -3483,12 +4194,12 @@ function ResultLogView({
                               type="checkbox"
                               checked={selectedResultIds.includes(result.id)}
                               onChange={(event) => onToggleResultSelection(result.id, event.target.checked)}
+                              onClick={(event) => event.stopPropagation()}
+                              onKeyDown={(event) => event.stopPropagation()}
                             />
                           </td>
                         )}
-                        <td className="text-12 result-log-id-cell">
-                          {filteredResults.length - ((resultPage - 1) * resultsPerPage + index)}
-                        </td>
+                        <td className="text-12 result-log-id-cell">{resultNumber}</td>
                         <td className="text-12">{result.requestCreatedAt || '-'}</td>
                         <td className="text-12">{result.completedAt}</td>
                         <td className="text-12">{result.serviceName || '-'}</td>
@@ -3503,7 +4214,8 @@ function ResultLogView({
                           ))}
                         </td>
                       </tr>
-                    ))
+                      );
+                    })
                   )}
                 </tbody>
               </table>
@@ -3529,6 +4241,52 @@ function ResultLogView({
           )}
         </div>
       </article>
+      {selectedResultDetail && (
+        <div
+          className="result-detail-overlay"
+          role="presentation"
+          onClick={() => setSelectedResultDetail(null)}
+        >
+          <div
+            className="result-detail-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="result-detail-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="result-detail-header">
+              <div>
+                <h3 id="result-detail-title" className="text-14">결과 로그 상세</h3>
+                <span className="text-12">번호 {selectedResultDetail.number}</span>
+              </div>
+              <div className="result-detail-actions">
+                <button className="primary-btn text-12" type="button" onClick={handlePrintSelectedResultPdf}>
+                  <span className="text-12">PDF 다운로드</span>
+                </button>
+                <button className="secondary-btn text-12" type="button" onClick={() => setSelectedResultDetail(null)}>
+                  <span className="text-12">닫기</span>
+                </button>
+              </div>
+            </div>
+            <div className="result-detail-grid">
+              <span className="text-12">검토 요청일</span>
+              <strong className="text-12">{selectedResultDetail.result.requestCreatedAt || '-'}</strong>
+              <span className="text-12">검토 완료일</span>
+              <strong className="text-12">{selectedResultDetail.result.completedAt}</strong>
+              <span className="text-12">서비스</span>
+              <strong className="text-12">{selectedResultDetail.result.serviceName || '-'}</strong>
+              <span className="text-12">요청자</span>
+              <strong className="text-12">{selectedResultDetail.result.requesterName || '-'}</strong>
+              <span className="text-12">검토자</span>
+              <strong className="text-12">{selectedResultDetail.result.reviewerName}</strong>
+            </div>
+            <div className="result-detail-body">
+              <strong className="text-12">검토 결과</strong>
+              <pre className="text-12">{selectedResultDetail.result.resultText || '-'}</pre>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
@@ -3637,6 +4395,7 @@ function PermissionsView({
   googleChatWebhookInput,
   googleChatWebhookUrls,
   openAIApiKeyInput,
+  openAIApiKeySaved,
   onChangeCurrentUserUnitName,
   onChangeGoogleChatWebhookInput,
   onChangeOpenAIApiKeyInput,
@@ -3665,6 +4424,7 @@ function PermissionsView({
   googleChatWebhookInput: string;
   googleChatWebhookUrls: string[];
   openAIApiKeyInput: string;
+  openAIApiKeySaved: boolean;
   onChangeCurrentUserUnitName: (value: string) => void;
   onChangeGoogleChatWebhookInput: (value: string) => void;
   onChangeOpenAIApiKeyInput: (value: string) => void;
@@ -3727,7 +4487,7 @@ function PermissionsView({
     memberUnitSaveTimersRef.current[memberId] = window.setTimeout(() => {
       delete memberUnitSaveTimersRef.current[memberId];
       onUpdateMemberUnitName(memberId, value);
-    }, 2000);
+    }, inputAutoSaveDelayMs);
   };
 
   const submitService = () => {
@@ -3976,9 +4736,10 @@ function PermissionsView({
                     type="password"
                     value={openAIApiKeyInput}
                     onChange={(event) => onChangeOpenAIApiKeyInput(event.target.value)}
-                    placeholder="sk-..."
+                    placeholder={openAIApiKeySaved ? '저장된 키가 있습니다. 새 키를 입력하면 교체됩니다.' : 'sk-...'}
                     disabled={currentUserRole !== 'admin'}
-                    autoComplete="off"
+                    autoComplete="new-password"
+                    spellCheck={false}
                   />
                   <button
                     className="primary-btn text-12 webhook-save-btn"

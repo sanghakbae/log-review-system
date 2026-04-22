@@ -55,10 +55,16 @@ export default defineConfig(({ mode }) => {
                     },
                     body: JSON.stringify({ text }),
                   });
+                  const responseBody = await response.text();
 
                   res.statusCode = response.ok ? 200 : response.status;
                   res.setHeader('Content-Type', 'application/json');
-                  res.end(JSON.stringify({ ok: response.ok, status: response.status }));
+                  res.end(JSON.stringify({
+                    ok: response.ok,
+                    status: response.status,
+                    statusText: response.statusText,
+                    error: response.ok ? undefined : responseBody,
+                  }));
                 } catch (error) {
                   res.statusCode = 500;
                   res.setHeader('Content-Type', 'application/json');
@@ -71,7 +77,6 @@ export default defineConfig(({ mode }) => {
       },
     ],
     define: {
-      'import.meta.env.OPENAI_API_KEY': JSON.stringify(env.OPENAI_API_KEY ?? ''),
       'import.meta.env.OPENAI_MODEL': JSON.stringify(env.OPENAI_MODEL ?? ''),
       'import.meta.env.LLM_PROVIDER': JSON.stringify(env.LLM_PROVIDER ?? ''),
     },

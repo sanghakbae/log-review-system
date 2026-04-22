@@ -8,6 +8,9 @@ type ReviewRequestInput = {
     mimeType: string;
     size: number;
     previewText: string | null;
+    originalFileName?: string;
+    convertedFromLog?: boolean;
+    parsedToCsv?: boolean;
   }>;
 };
 
@@ -79,14 +82,23 @@ const getAttachmentInstruction = (extension: string) => {
 const formatAttachmentSummary = (attachments: NonNullable<ReviewRequestInput['attachments']>) =>
   attachments
     .map((item, index) => {
-      const previewLimit = item.extension === 'xlsx' ? 6000 : 1200;
+      const usesParsedCsv = Boolean(item.parsedToCsv || item.convertedFromLog);
+      const previewLimit = item.extension === 'xlsx' || usesParsedCsv ? 6000 : 1200;
       const preview = item.previewText ? item.previewText.slice(0, previewLimit) : '내용 미리보기를 추출하지 못했습니다.';
       const instruction = getAttachmentInstruction(item.extension);
+      const conversionNote = usesParsedCsv
+        ? [
+            `원본 파일: ${item.originalFileName ?? item.fileName}`,
+            '분석 기준: 업로드 원본이 아니라 파싱되어 저장된 CSV 내용을 기준으로 분석한다.',
+            '파싱 CSV 주요 컬럼: line_number, date, time, timestamp, service, action, target_email, actor_email, ip_addresses, primary_ip, emails, file_name, reason, bracket_groups, message, raw.',
+          ].join('\n')
+        : '';
       return [
         `${index + 1}. ${item.fileName} (${item.extension || 'unknown'}, ${item.mimeType || 'unknown'}, ${item.size} bytes)`,
+        conversionNote,
         `분석 지시: ${instruction}`,
         preview,
-      ].join('\n');
+      ].filter(Boolean).join('\n');
     })
     .join('\n\n');
 
@@ -157,6 +169,8 @@ export const generateReviewGuide = async (request: ReviewRequestInput, settings?
                 `\n- 날짜 판정 규칙:\n${getDateRuleInstruction()}` +
                 `\n\n결과 요구사항:\n` +
                 `- 반드시 첨부 파일에서 확인한 사실을 우선 적어.\n` +
+                `- 업로드 파일이 파싱 CSV로 변환된 경우, 분석은 반드시 변환된 CSV 컬럼과 값 기준으로 수행해.\n` +
+                `- 먼저 현재 첨부 파일에서 점검할 만한 항목을 목록화하듯 식별한 뒤, 근거가 있는 항목만 최종 표에 반영해.\n` +
                 `- 근거 칸에는 실제 로그 내용 일부를 반드시 포함해. 예: 시트명, 행 번호, 컬럼명=값, email_address, ipaddress, request_uri, request_vars, regdate, 권한명, ACCESS 값.\n` +
                 `- 근거 칸에 "-", "확인 불가", "로그에서 확인"처럼 추상적으로만 쓰지 마. 실제 원문 값이 없으면 해당 항목을 만들지 마.\n` +
                 `- 추측은 최소화하고, 불확실하면 불확실하다고 적어.\n` +
