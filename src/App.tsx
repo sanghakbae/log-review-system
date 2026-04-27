@@ -163,31 +163,35 @@ const isEndorphinAdminName = (name?: string | null) => name?.trim() === '엔돌�
 const accessRecordReviewPrompt = [
   '너는 출입 인증 기록 감사 담당자다.',
   '첨부된 출입기록 엑셀 또는 CSV를 기준으로 출입/인증 이상 이력을 한국어로 검토한다.',
-  '출력은 반드시 Markdown 표 1개만 사용한다.',
-  '표 컬럼은 `항목 | 내용 | 판단 | 근거 | 조치` 로 고정한다.',
-  '판단 값은 `양호`, `주의`, `위험` 중 하나만 사용한다.',
+  '출력은 표가 아니라 SUMMARY 형식으로 작성한다.',
+  'SUMMARY는 짧은 문단과 불릿으로 구성한다.',
+  '권장 섹션은 요약, 주요 발견, 인증 실패, 주말/공휴일 출입, 휴일 새벽 출근, 근거, 권고 조치다.',
+  '판단은 양호/주의/위험 표현을 문장 안에 자연스럽게 포함한다.',
   '근거에는 반드시 실제 컬럼명과 값을 포함한다. 예: 발생일자=2026-01-02, 요일=금요일, 발생시각=06:50:40, 단말기ID=0001, 사용자ID=0228, 이름=..., 모드=출근, 인증=얼굴, 결과=X, 시트명=Sheet1, 행=2.',
   '아래 항목을 우선 점검한다.',
-  '1. 인증 실패 집중도: 결과=X 건을 사용자ID, 이름, 단말기ID, 발생일자, 발생시각 기준으로 집계한다.',
-  '2. 짧은 시간 내 반복 인증: 동일 사용자ID가 짧은 시간 안에 출입/해제/출근/퇴근을 반복한 이력을 확인한다.',
-  '3. 휴일 새벽에 출근한 이력: 발생일자가 실제 토요일/일요일 또는 휴일이고 발생시각이 새벽 시간대인 모드=출근 기록을 확인한다.',
-  '4. 동일 사용자 다중 단말기 사용: 같은 사용자ID가 같은 날 여러 단말기ID에서 인증한 이력을 확인한다.',
+  '1. 인증 실패 집중도: 결과=X 또는 실패 건을 사용자ID와 이름 기준으로 집계해 누가 몇 번 실패했는지 확인한다.',
+  '2. 주말 출입 기록: 발생일자가 실제 토요일/일요일인 모든 출입/해제/출근/퇴근/인증 기록을 확인한다.',
+  '3. 공휴일 출입 기록: 발생일자가 한국 기준 공휴일, 대체공휴일, 임시공휴일인 모든 출입/해제/출근/퇴근/인증 기록을 확인한다.',
+  '4. 휴일 새벽 출근 이력: 주말 또는 공휴일 출입 중 발생시각이 새벽 시간대이고 모드=출근인 기록을 별도 위험 후보로 확인한다.',
   '5. 출입 흐름 정합성: 출근 없이 퇴근, 퇴근 없이 야간 출입, 외출 후 복귀 누락, 해제 후 출입 반복 등 모드 순서 이상을 확인한다.',
   '6. 인증 수단 편중: 얼굴/카드 등 인증 방식이 특정 사용자ID, 단말기ID, 시간대에 몰리는지 확인한다.',
-  '7. 사용자 마스터 정보 누락: 사원번호, 직급 등 감사 식별에 필요한 컬럼이 비어 있는지 확인한다.',
+  '출력은 각 항목별 최대 5명까지만 요약한다.',
+  '출력 예시는 다음 형식을 따른다: 주말 출근자: 홍길동(2일), 김흥국(3일) / 공휴일 출근자: 김말숙(1일) / 00시~05시 출입자: 신동호(4일) / 인증실패: 백승화(100건), ####(50건).',
+  '동일 사용자 다중 단말기 사용, 짧은 시간 내 반복 인증, 사용자 마스터 정보 누락은 별도 요청이 없으면 결과 항목으로 만들지 않는다.',
   '날짜가 있으면 실제 달력 기준 요일을 확인하고 근거에 날짜와 요일을 함께 적는다.',
   '휴일 또는 주말 여부를 날짜 문자열만 보고 추정하지 않는다.',
   '근거가 없는 항목은 만들지 않는다.',
-  '표 외의 머리말, 번호 목록, 맺음말, 코드블록은 쓰지 않는다.',
+  'Markdown 표와 코드블록은 쓰지 않는다.',
 ].join('\n');
 const defaultReviewPromptSlots = [
   [
     '너는 범용 업무 검토 분석가다.',
     '아래 등록 프롬프트와 입력 자료를 바탕으로, 보안·운영·품질·장애·권한·감사·이상행위 관점에서 한국어로 판단한다.',
     '입력은 신청 건 제목, 요청자, 서비스명, 첨부 파일, 선택된 프롬프트 보조 지시문이 될 수 있다.',
-    '출력은 반드시 Markdown 표 1개만 사용한다.',
-    '표 컬럼은 `항목 | 내용 | 판단 | 근거 | 조치` 로 고정한다.',
-    '판단 값은 `양호`, `주의`, `위험` 중 하나만 사용한다.',
+    '출력은 표가 아니라 SUMMARY 형식으로 작성한다.',
+    'SUMMARY는 짧은 문단과 불릿으로 구성한다.',
+    '권장 섹션은 요약, 주요 발견, 근거, 영향, 권고 조치다.',
+    '판단은 양호/주의/위험 표현을 문장 안에 자연스럽게 포함한다.',
     '근거는 입력된 사실만 적고, 추측은 최소화한다.',
     '날짜가 있으면 달력 기준 요일을 확인하고, 주말 여부는 실제 토요일/일요일일 때만 판단한다.',
     '파일이 .log, .csv, .json이면 형식별 특징을 함께 본다.',
@@ -195,7 +199,7 @@ const defaultReviewPromptSlots = [
     '- .csv: 컬럼 분포, 반복 행, 이상치, 특정 값 편중, 집계 패턴',
     '- .json: 중첩 구조, 배열 반복, 오류 객체, 키별 패턴, 메타데이터',
     '결과는 실행 가능한 조치 중심으로 짧고 명확하게 쓴다.',
-    '표 외의 머리말, 번호 목록, 맺음말, 코드블록은 쓰지 않는다.',
+    'Markdown 표와 코드블록은 쓰지 않는다.',
   ].join('\n'),
   '',
   '',
@@ -607,6 +611,8 @@ const allowedLogExtensions = new Set(['log', 'csv', 'json', 'xlsx']);
 const textPreviewExtensions = new Set(['log', 'csv', 'json']);
 const xlsxPreviewMaxRowsPerSheet = 80;
 const xlsxPreviewMaxColumnsPerSheet = 16;
+const textPreviewMaxChars = 20000;
+const attachmentAnalysisMaxChars = 3_000_000;
 
 const getFileExtension = (name: string) => name.split('.').pop()?.toLowerCase() ?? '';
 
@@ -1095,7 +1101,7 @@ const buildXlsxPreview = async (file: File) => {
   }
 };
 
-const buildFilePreview = async (file: File) => {
+const buildFilePreview = async (file: File, maxChars = textPreviewMaxChars) => {
   const extension = file.name.split('.').pop()?.toLowerCase() ?? '';
   if (extension === 'xlsx') {
     return buildXlsxPreview(file);
@@ -1105,7 +1111,7 @@ const buildFilePreview = async (file: File) => {
 
   try {
     const text = await file.text();
-    const preview = text.trim().slice(0, 4000);
+    const preview = text.trim().slice(0, maxChars);
     return preview || null;
   } catch {
     return null;
@@ -2121,8 +2127,17 @@ function App() {
       return;
     }
 
+    const latestResultRows = Array.from(
+      (data ?? [])
+        .reduce((items, row) => {
+          if (!row.request_id || items.has(row.request_id)) return items;
+          items.set(row.request_id, row);
+          return items;
+        }, new Map<string, NonNullable<typeof data>[number]>())
+        .values(),
+    );
     const requestIds = Array.from(
-      new Set((data ?? []).map((row) => row.request_id).filter((value): value is string => Boolean(value))),
+      new Set(latestResultRows.map((row) => row.request_id).filter((value): value is string => Boolean(value))),
     );
     const { data: requestRows, error: requestLoadError } = requestIds.length
       ? await supabase
@@ -2137,7 +2152,7 @@ function App() {
 
     const requestMap = new Map((requestRows ?? []).map((row) => [row.id, row]));
 
-    const dbResultsWithSort = (data ?? []).map((row) => {
+    const dbResultsWithSort = latestResultRows.map((row) => {
       const request = requestMap.get(row.request_id ?? '') ?? requests.find((item) => item.id === row.request_id);
       const requestDate = request?.request_created_at || request?.created_at;
       const completedDate = getNextDayDate(requestDate);
@@ -2205,10 +2220,10 @@ function App() {
     [requests, selectedRequestId],
   );
 
-  const loadAttachmentPreviews = async (attachments: ReviewFileSummary[]) => {
+  const loadAttachmentPreviews = async (attachments: ReviewFileSummary[], options?: { useAttachedFileForAnalysis?: boolean }) => {
     const resolvedAttachments = await Promise.all(
       attachments.map(async (attachment) => {
-        if (attachment.previewText) {
+        if (attachment.previewText && !options?.useAttachedFileForAnalysis) {
           return attachment;
         }
 
@@ -2225,7 +2240,10 @@ function App() {
           const previewFile = new File([data], attachment.fileName, {
             type: attachment.mimeType || data.type || 'application/octet-stream',
           });
-          const previewText = await buildFilePreview(previewFile);
+          const previewText = await buildFilePreview(
+            previewFile,
+            options?.useAttachedFileForAnalysis ? attachmentAnalysisMaxChars : textPreviewMaxChars,
+          );
 
           return {
             ...attachment,
@@ -2411,7 +2429,9 @@ function App() {
 
       if (isOpenAIConfigured(openAISettings)) {
         const effectivePromptText = resolvePromptTextForService(request.service_name, reviewPromptSlots, selectedReviewPromptIndex);
-        const attachments = await loadAttachmentPreviews(request.file_summaries ?? []);
+        const attachments = await loadAttachmentPreviews(request.file_summaries ?? [], {
+          useAttachedFileForAnalysis: true,
+        });
         const guide = await generateReviewGuide({
           serviceName: request.service_name,
           logFileCount: request.log_file_count,
@@ -2481,14 +2501,37 @@ function App() {
 
     if (isSupabaseConfigured && sessionUser) {
       void (async () => {
-        const { error: resultError } = await supabase.from('lr_review_results').insert({
-          id: resultId,
-          request_id: selectedRequest.id,
+        const { data: existingResult, error: existingResultError } = await supabase
+          .from('lr_review_results')
+          .select('id')
+          .eq('request_id', selectedRequest.id)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (existingResultError) {
+          console.error('Review result lookup failed:', existingResultError.message);
+          showSaveNotice('error', '검토 결과 조회 실패');
+          return;
+        }
+
+        const savedResultId = existingResult?.id ?? resultId;
+        const resultPayload = {
           reviewer_id: sessionUser.id,
           summary: trimmed,
           feedback: trimmed,
           recommendation: null,
-        });
+        };
+        const { error: resultError } = existingResult
+          ? await supabase
+              .from('lr_review_results')
+              .update(resultPayload)
+              .eq('id', savedResultId)
+          : await supabase.from('lr_review_results').insert({
+              id: savedResultId,
+              request_id: selectedRequest.id,
+              ...resultPayload,
+            });
 
         if (resultError) {
           console.error('Review result save failed:', resultError.message);
@@ -2499,13 +2542,14 @@ function App() {
         const { error: logError } = await supabase.from('lr_review_logs').insert({
           request_id: selectedRequest.id,
           actor_id: sessionUser.id,
-          action: 'review_completed',
+          action: existingResult ? 'review_updated' : 'review_completed',
           details: {
-            id: resultId,
-            result_id: resultId,
+            id: savedResultId,
+            result_id: savedResultId,
             summary: trimmed,
             service_name: selectedRequest.service_name || '',
             requester_name: selectedRequest.requester_name,
+            overwrite_existing_result: Boolean(existingResult),
           },
         });
 
@@ -3702,11 +3746,26 @@ function ReviewResultView({
     isTruncated: boolean;
   } | null>(null);
   const reviewResultEditorRef = useRef<HTMLDivElement | null>(null);
-  const requestsPerPage = 10;
+  const requestsPerPage = 5;
   const requestPageCount = Math.max(1, Math.ceil(requests.length / requestsPerPage));
+  const sortedRequestsByNumberDesc = useMemo(
+    () =>
+      [...requests].sort((first, second) => {
+        const firstRequestTime = new Date(first.request_created_at || first.created_at).getTime();
+        const secondRequestTime = new Date(second.request_created_at || second.created_at).getTime();
+        const firstTime = Number.isNaN(firstRequestTime) ? 0 : firstRequestTime;
+        const secondTime = Number.isNaN(secondRequestTime) ? 0 : secondRequestTime;
+        if (firstTime !== secondTime) return secondTime - firstTime;
+
+        const firstCreatedTime = new Date(first.created_at).getTime();
+        const secondCreatedTime = new Date(second.created_at).getTime();
+        return (Number.isNaN(secondCreatedTime) ? 0 : secondCreatedTime) - (Number.isNaN(firstCreatedTime) ? 0 : firstCreatedTime);
+      }),
+    [requests],
+  );
   const pagedRequests = useMemo(
-    () => requests.slice((requestPage - 1) * requestsPerPage, requestPage * requestsPerPage),
-    [requestPage, requests],
+    () => sortedRequestsByNumberDesc.slice((requestPage - 1) * requestsPerPage, requestPage * requestsPerPage),
+    [requestPage, sortedRequestsByNumberDesc],
   );
   const requestNumberByCreatedAt = useMemo(() => {
     const sortedRequests = [...requests].sort((first, second) => {
@@ -3758,13 +3817,13 @@ function ReviewResultView({
 
     const selectedExists = selectedRequestId ? requests.some((request) => request.id === selectedRequestId) : false;
     if (!selectedRequestId || !selectedExists) {
-      const latestRequest = requests[0];
+      const latestRequest = sortedRequestsByNumberDesc[0];
       if (latestRequest) {
         // Keep the review screen focused on the latest request while still allowing selection.
         onSelectRequest(latestRequest.id);
       }
     }
-  }, [onSelectRequest, requests, selectedRequestId]);
+  }, [onSelectRequest, requests, selectedRequestId, sortedRequestsByNumberDesc]);
 
   const handleStartReview = () => {
     if (!selectedRequest) return;
