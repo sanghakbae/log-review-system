@@ -16,6 +16,7 @@ type ReviewRequest = {
   log_file_count?: number;
   request_body?: string;
   file_summaries?: ReviewFileSummary[];
+  preview_summaries?: ReviewFileSummary[];
   status: 'submitted' | 'in_review' | 'done';
   request_created_at?: string;
   created_at: string;
@@ -1371,6 +1372,7 @@ function App() {
   const [reviewResults, setReviewResults] = useState<ReviewResultEntry[]>([]);
   const [selectedRequestIds, setSelectedRequestIds] = useState<string[]>([]);
   const [selectedResultIds, setSelectedResultIds] = useState<string[]>([]);
+  const [reviewUploadBucketClearing, setReviewUploadBucketClearing] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [saveNotice, setSaveNotice] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
   const [profileSyncVersion, setProfileSyncVersion] = useState(0);
@@ -1997,6 +1999,7 @@ function App() {
           ...item,
           request_created_at: item.request_created_at || item.created_at,
           file_summaries: [],
+          preview_summaries: [],
         })) as ReviewRequest[];
 
         setRequests(publicRequests);
@@ -2048,17 +2051,20 @@ function App() {
         attachmentSummaries.set(attachment.request_id, [...currentSummaries, parsedSummary]);
       }
 
-      const dbRequests = (data ?? []).map((item) => ({
-          ...item,
-          request_created_at: item.request_created_at || item.created_at,
-          service_name: parseStoredRequestBody(item.request_body)?.serviceName ?? '',
-          log_file_count:
-            attachmentCounts.get(item.id) ?? parseStoredRequestBody(item.request_body)?.logFiles?.length ?? 0,
-          file_summaries:
-            attachmentSummaries.get(item.id) ??
-            parseStoredRequestBody(item.request_body)?.logFiles ??
-            [],
-        })) as ReviewRequest[];
+      const dbRequests = (data ?? []).map((item) => {
+          const storedRequestBody = parseStoredRequestBody(item.request_body);
+          const storedPreviewSummaries = storedRequestBody?.logFiles ?? [];
+          const attachedSummaries = attachmentSummaries.get(item.id) ?? [];
+
+          return {
+            ...item,
+            request_created_at: item.request_created_at || item.created_at,
+            service_name: storedRequestBody?.serviceName ?? '',
+            log_file_count: storedPreviewSummaries.length || attachmentCounts.get(item.id) || 0,
+            file_summaries: attachedSummaries,
+            preview_summaries: storedPreviewSummaries.length ? storedPreviewSummaries : attachedSummaries,
+          };
+        }) as ReviewRequest[];
 
       setRequests(dbRequests);
       setRequestsLoaded(true);
@@ -2303,61 +2309,15 @@ function App() {
         return { ok: false, errorMessage: `검토 요청 저장 실패: ${requestError.message}` };
       }
 
-      const uploadedFiles: Array<{
-        request_id: string;
-        file_name: string;
-        storage_bucket: string;
-        storage_path: string;
-        mime_type: string | null;
-      }> = [];
-
-      for (const [index, entry] of submission.logFiles.entries()) {
-        const safeName = sanitizeStorageFileName(entry.file.name || `file-${index + 1}`);
-        const storagePath = `${sessionUser.id}/${requestId}/${String(index + 1).padStart(2, '0')}-${safeName}`;
-        const { error: uploadError } = await supabase.storage.from(reviewUploadBucket).upload(storagePath, entry.file, {
-          contentType: entry.file.type || 'application/octet-stream',
-          upsert: false,
-        });
-
-        if (uploadError) {
-          console.error('File upload failed:', uploadError.message);
-          continue;
-        }
-
-        uploadedFiles.push({
-          request_id: requestId,
-          file_name: entry.file.name,
-          storage_bucket: reviewUploadBucket,
-          storage_path: storagePath,
-          mime_type: entry.file.type || null,
-        });
-      }
-
-      if (uploadedFiles.length > 0) {
-        const { error: attachmentError } = await supabase.from('lr_review_attachments').insert(uploadedFiles);
-        if (attachmentError) {
-          console.error('Attachment metadata save failed:', attachmentError.message);
-          return { ok: false, errorMessage: `첨부 메타데이터 저장 실패: ${attachmentError.message}` };
-        }
-      }
-
-      const uploadedFileSummaries = fileSummaries.map((summary) => {
-        const uploadedFile = uploadedFiles.find((file) => file.file_name === summary.fileName);
-        return {
-          ...summary,
-          storagePath: uploadedFile?.storage_path,
-        };
-      });
-
       const webhookSent = await sendWebhookNotifications([
         '검토 요청이 등록되었습니다.',
         `제목: ${title}`,
         `요청자: ${requesterName}`,
         `서비스명: ${serviceName || '-'}`,
         `요청 시각: ${formatKoreaDateTime(requestRow.request_created_at)}`,
-        `첨부 파일 수: ${uploadedFiles.length}개`,
-        ...(uploadedFiles.length > 0
-          ? ['첨부 파일 목록:', ...uploadedFiles.map((file) => `- ${file.file_name}`)]
+        `첨부 파일 수: ${fileSummaries.length}개`,
+        ...(fileSummaries.length > 0
+          ? ['첨부 파일 목록:', ...fileSummaries.map((file) => `- ${file.originalFileName || file.fileName}`)]
           : ['첨부 파일 목록: -']),
       ]);
 
@@ -2370,9 +2330,10 @@ function App() {
         title,
         requester_name: requesterName,
         service_name: serviceName,
-        log_file_count: uploadedFiles.length,
+        log_file_count: fileSummaries.length,
         request_body: requestBody,
-        file_summaries: uploadedFileSummaries,
+        file_summaries: [],
+        preview_summaries: fileSummaries,
         status: 'submitted',
         request_created_at: requestRow.request_created_at,
         created_at: new Date().toISOString(),
@@ -2392,7 +2353,8 @@ function App() {
       service_name: serviceName,
       log_file_count: fileSummaries.length,
       request_body: requestBody,
-      file_summaries: fileSummaries,
+      file_summaries: [],
+      preview_summaries: fileSummaries,
       status: 'submitted',
       request_created_at: new Date().toISOString(),
       created_at: new Date().toISOString(),
@@ -2429,7 +2391,7 @@ function App() {
 
       if (isOpenAIConfigured(openAISettings)) {
         const effectivePromptText = resolvePromptTextForService(request.service_name, reviewPromptSlots, selectedReviewPromptIndex);
-        const attachments = await loadAttachmentPreviews(request.file_summaries ?? [], {
+        const attachments = await loadAttachmentPreviews(request.preview_summaries?.length ? request.preview_summaries : request.file_summaries ?? [], {
           useAttachedFileForAnalysis: true,
         });
         const guide = await generateReviewGuide({
@@ -2842,6 +2804,87 @@ function App() {
     showSaveNotice('success', '저장 성공');
   };
 
+  const listReviewUploadStoragePaths = async (prefix = ''): Promise<string[]> => {
+    const paths: string[] = [];
+    let offset = 0;
+
+    while (true) {
+      const { data, error } = await supabase.storage.from(reviewUploadBucket).list(prefix, {
+        limit: 1000,
+        offset,
+        sortBy: { column: 'name', order: 'asc' },
+      });
+
+      if (error) {
+        throw error;
+      }
+
+      if (!data || data.length === 0) {
+        break;
+      }
+
+      for (const item of data) {
+        const itemPath = prefix ? `${prefix}/${item.name}` : item.name;
+        if (item.id || item.metadata) {
+          paths.push(itemPath);
+        } else {
+          paths.push(...(await listReviewUploadStoragePaths(itemPath)));
+        }
+      }
+
+      if (data.length < 1000) {
+        break;
+      }
+
+      offset += 1000;
+    }
+
+    return paths;
+  };
+
+  const clearReviewUploadBucket = async () => {
+    if (!isAdminRole(currentUserRole)) {
+      showSaveNotice('error', '삭제 권한이 없습니다.');
+      return;
+    }
+
+    if (!isSupabaseConfigured || !sessionUser) {
+      showSaveNotice('error', 'Supabase 연결이 필요합니다.');
+      return;
+    }
+
+    const confirmed = window.confirm('review-uploads 버킷의 모든 파일을 삭제할까요? 이 작업은 되돌릴 수 없습니다.');
+    if (!confirmed) {
+      return;
+    }
+
+    setReviewUploadBucketClearing(true);
+
+    try {
+      const storagePaths = await listReviewUploadStoragePaths();
+
+      if (storagePaths.length === 0) {
+        showSaveNotice('success', '삭제할 파일이 없습니다.');
+        return;
+      }
+
+      for (let index = 0; index < storagePaths.length; index += 100) {
+        const batch = storagePaths.slice(index, index + 100);
+        const { error } = await supabase.storage.from(reviewUploadBucket).remove(batch);
+        if (error) {
+          throw error;
+        }
+      }
+
+      showSaveNotice('success', `${storagePaths.length}개 파일을 삭제했습니다.`);
+    } catch (error) {
+      console.error('Failed to clear review upload bucket:', error);
+      showSaveNotice('error', '버킷 전체 삭제 실패');
+    } finally {
+      setReviewUploadBucketClearing(false);
+    }
+  };
+
   const removeSelectedResults = async () => {
     if (!isAdminRole(currentUserRole) || selectedResultIds.length === 0) return;
 
@@ -3195,6 +3238,8 @@ function App() {
                 serviceNames={serviceNames}
                 onAddServiceName={addServiceName}
                 onRemoveServiceName={removeServiceName}
+                onClearReviewUploadBucket={() => void clearReviewUploadBucket()}
+                reviewUploadBucketClearing={reviewUploadBucketClearing}
                 onSelectPromptForEditing={setEditingReviewPromptIndex}
                 onSelectReviewPromptSlot={setSelectedReviewPromptIndex}
                 onChangeReviewPrompt={(value) =>
@@ -3785,7 +3830,7 @@ function ReviewResultView({
   const selectedRequest = requests.find((request) => request.id === selectedRequestId) ?? null;
   const canDeleteRequests = isReviewerOrAbove(currentUserRole);
   const canDownloadAttachments = isReviewerOrAbove(currentUserRole);
-  const selectedAttachments = selectedRequest?.file_summaries ?? [];
+  const selectedPreviewSummaries = selectedRequest?.preview_summaries ?? selectedRequest?.file_summaries ?? [];
   const parsedReviewGuideRows = useMemo(
     () => (reviewGuideText ? parseReviewGuideTable(reviewGuideText) : null),
     [reviewGuideText],
@@ -3881,33 +3926,53 @@ function ReviewResultView({
   };
 
   const handlePreviewAttachment = async (attachment: ReviewFileSummary, fileKey: string) => {
-    if (!canDownloadAttachments || !attachment.storagePath) return;
+    if (!canDownloadAttachments) return;
 
     setDownloadError(null);
     setDownloadingFileKey(fileKey);
 
     try {
+      const downloadFileName = attachment.parsedToCsv || ['log', 'json', 'xlsx'].includes(getFileExtension(attachment.fileName))
+        ? replaceFileExtension(attachment.fileName, 'csv')
+        : attachment.fileName || 'log-file.csv';
+
+      if (attachment.previewText) {
+        const previewBlob = new Blob([attachment.previewText], { type: 'text/csv;charset=utf-8' });
+        setCsvPreview({
+          fileName: downloadFileName,
+          blob: previewBlob,
+          previewText: attachment.previewText,
+          rows: parseCsvPreviewRows(attachment.previewText),
+          isTruncated: false,
+        });
+        return;
+      }
+
+      if (!attachment.storagePath) {
+        throw new Error('미리보기 데이터가 없습니다.');
+      }
+
       const { data, error } = await supabase.storage.from(reviewUploadBucket).download(attachment.storagePath);
       if (error || !data) {
         throw new Error(error?.message ?? '파일을 불러오지 못했습니다.');
       }
 
       let downloadBlob: Blob = data;
-      let downloadFileName = attachment.fileName || 'log-file.csv';
-      const extension = getFileExtension(downloadFileName);
+      let resolvedDownloadFileName = downloadFileName;
+      const extension = getFileExtension(resolvedDownloadFileName);
       if (['log', 'json', 'xlsx'].includes(extension)) {
-        const sourceFile = new File([data], downloadFileName, {
+        const sourceFile = new File([data], resolvedDownloadFileName, {
           type: attachment.mimeType || data.type || 'application/octet-stream',
         });
         const csvFile = await convertUploadFileToParsedCsv(sourceFile);
         downloadBlob = csvFile;
-        downloadFileName = csvFile.name;
+        resolvedDownloadFileName = csvFile.name;
       }
 
       const previewSliceSize = 280 * 1024;
       const previewText = await downloadBlob.slice(0, previewSliceSize).text();
       setCsvPreview({
-        fileName: downloadFileName,
+        fileName: resolvedDownloadFileName,
         blob: downloadBlob,
         previewText,
         rows: parseCsvPreviewRows(previewText),
@@ -4140,10 +4205,10 @@ function ReviewResultView({
             <div className="table-row result-entry-row">
               <span className="text-12 result-entry-label-cell">파싱 CSV</span>
               <div className="result-entry-value result-entry-readonly attachment-download-list">
-                {selectedAttachments.length === 0 ? (
+                {selectedPreviewSummaries.length === 0 ? (
                   <span className="text-12">-</span>
                 ) : (
-                  selectedAttachments.map((file, index) => {
+                  selectedPreviewSummaries.map((file, index) => {
                     const fileKey = `${selectedRequest?.id ?? 'request'}-${file.storagePath ?? file.fileName}-${index}`;
                     const isDownloading = downloadingFileKey === fileKey;
                     const downloadFileName = file.parsedToCsv || ['log', 'json', 'xlsx'].includes(getFileExtension(file.fileName))
@@ -4155,8 +4220,8 @@ function ReviewResultView({
                         className="secondary-btn text-12 attachment-download-btn"
                         type="button"
                         onClick={() => void handlePreviewAttachment(file, fileKey)}
-                        disabled={!canDownloadAttachments || !file.storagePath || isDownloading}
-                        title={file.storagePath ? `${downloadFileName} 미리보기` : '저장 경로가 없어 미리볼 수 없습니다'}
+                        disabled={!canDownloadAttachments || (!file.previewText && !file.storagePath) || isDownloading}
+                        title={file.previewText || file.storagePath ? `${downloadFileName} 미리보기` : '미리보기 데이터가 없습니다'}
                       >
                         <span className="text-12">{isDownloading ? '불러오는 중...' : `${downloadFileName} 미리보기`}</span>
                       </button>
@@ -4835,6 +4900,8 @@ function PermissionsView({
   serviceNames,
   onAddServiceName,
   onRemoveServiceName,
+  onClearReviewUploadBucket,
+  reviewUploadBucketClearing,
   onSelectPromptForEditing,
   onChangeReviewPrompt,
   onSelectReviewPromptSlot,
@@ -4864,6 +4931,8 @@ function PermissionsView({
   serviceNames: string[];
   onAddServiceName: (name: string) => void;
   onRemoveServiceName: (name: string) => void;
+  onClearReviewUploadBucket: () => void;
+  reviewUploadBucketClearing: boolean;
   onSelectPromptForEditing: (index: number) => void;
   onChangeReviewPrompt: (value: string) => void;
   onSelectReviewPromptSlot: (index: number) => void;
@@ -5141,6 +5210,22 @@ function PermissionsView({
                         </div>
                       ))
                     )}
+                  </div>
+
+                  <div className="service-storage-tools">
+                    <div className="prompt-card-note text-12">
+                      review-uploads 버킷에 쌓인 첨부 파일을 한 번에 비울 수 있습니다.
+                    </div>
+                    <button
+                      className="secondary-btn text-12 service-danger-btn"
+                      type="button"
+                      onClick={onClearReviewUploadBucket}
+                      disabled={currentUserRole !== 'admin' || reviewUploadBucketClearing}
+                    >
+                      <span className="text-12">
+                        {reviewUploadBucketClearing ? '삭제 중...' : 'review-uploads 전체 삭제'}
+                      </span>
+                    </button>
                   </div>
                 </div>
               </div>

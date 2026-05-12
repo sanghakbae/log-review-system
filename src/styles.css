@@ -2886,6 +2886,11 @@ textarea {
   padding: 0;
 }
 
+.service-storage-tools {
+  display: grid;
+  gap: 8px;
+}
+
 .sidebar.collapsed {
   padding-inline: 6px;
   gap: 14px;
@@ -2968,6 +2973,19 @@ textarea {
   min-width: 0;
   align-self: center;
   width: 100%;
+}
+
+.service-danger-btn {
+  width: 100%;
+  min-height: 34px;
+  color: #b42318;
+  border-color: rgba(180, 35, 24, 0.2);
+  background: rgba(254, 243, 242, 0.9);
+}
+
+.service-danger-btn:hover:not(:disabled) {
+  background: rgba(254, 228, 226, 0.95);
+  border-color: rgba(180, 35, 24, 0.28);
 }
 
 .service-item span {
