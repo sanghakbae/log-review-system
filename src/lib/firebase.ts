@@ -20,12 +20,9 @@
 import { initializeApp, type FirebaseApp } from 'firebase/app';
 import {
   GoogleAuthProvider,
-  browserLocalPersistence,
   getAuth,
-  getRedirectResult,
   onAuthStateChanged,
-  setPersistence,
-  signInWithRedirect,
+  signInWithPopup,
   signOut as fbSignOut,
   type Auth,
   type User as FirebaseUser,
@@ -114,12 +111,6 @@ if (isFirebaseConfigured) {
   app = initializeApp(firebaseConfig as Required<typeof firebaseConfig>);
   authInstance = getAuth(app);
   dbInstance = getFirestore(app);
-  // Keep the session across the full-page redirect sign-in, and finish any
-  // pending redirect result on load (onAuthStateChanged then fires).
-  void setPersistence(authInstance, browserLocalPersistence).catch(() => undefined);
-  void getRedirectResult(authInstance).catch((error) => {
-    console.error('Redirect sign-in failed:', error?.code ?? error?.message ?? error);
-  });
 } else {
   console.warn('Missing VITE_FIREBASE_* config; auth/data actions are disabled.');
 }
@@ -474,12 +465,9 @@ const authShim = {
   async signInWithOAuth(_opts?: { provider?: string; options?: unknown }): Promise<Result<unknown>> {
     if (!authInstance) return { data: null, error: { message: 'Firebase is not configured' } };
     try {
-      // Use a full-page redirect (not a popup): on a custom domain where the app
-      // origin differs from authDomain, popups silently hang without resolving
-      // due to third-party storage partitioning. Redirect is reliable.
       const provider = new GoogleAuthProvider();
       provider.setCustomParameters({ prompt: 'select_account' });
-      await signInWithRedirect(authInstance, provider);
+      await signInWithPopup(authInstance, provider);
       return { data: null, error: null };
     } catch (error) {
       return { data: null, error: { message: error instanceof Error ? error.message : 'Sign-in failed' } };
