@@ -1,0 +1,102 @@
+rules_version = '2';
+
+// Security rules reproducing the intent of the former Supabase RLS policies.
+// Role lives on each profile document (lr_profiles/{uid}.role): requester |
+// reviewer | admin. Helpers look the caller's role up from that document.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function myProfile() {
+      return get(/databases/$(database)/documents/lr_profiles/$(request.auth.uid)).data;
+    }
+
+    function myRole() {
+      return signedIn() ? myProfile().role : 'anonymous';
+    }
+
+    function isAdmin() {
+      return signedIn() && myRole() == 'admin';
+    }
+
+    function isReviewerOrAdmin() {
+      return signedIn() && (myRole() == 'reviewer' || myRole() == 'admin');
+    }
+
+    // Profiles: any signed-in user can read the roster; you may write your own
+    // profile (the login upsert), and admins may write any.
+    match /lr_profiles/{uid} {
+      allow read: if signedIn();
+      allow write: if signedIn() && (request.auth.uid == uid || isAdmin());
+    }
+
+    // Review requests are sensitive (they carry request_body). Only signed-in
+    // users may read them; the requester or a reviewer/admin may mutate.
+    match /lr_review_requests/{id} {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.resource.data.requester_id == request.auth.uid;
+      allow update: if signedIn()
+        && (resource.data.requester_id == request.auth.uid || isReviewerOrAdmin());
+      allow delete: if isReviewerOrAdmin();
+    }
+
+    // Public projection: readable by anyone (including logged-out visitors).
+    // Only signed-in users may write it (the client shim keeps it in sync when
+    // it writes the parent request).
+    match /lr_public_review_requests/{id} {
+      allow read: if true;
+      allow write: if signedIn();
+    }
+
+    // Attachments / results / logs: readable when signed in; writes gated by role.
+    match /lr_review_attachments/{id} {
+      allow read: if signedIn();
+      allow write: if signedIn();
+    }
+
+    match /lr_review_results/{id} {
+      allow read: if signedIn();
+      allow write: if isReviewerOrAdmin();
+    }
+
+    match /lr_review_logs/{id} {
+      allow read: if signedIn();
+      allow write: if isReviewerOrAdmin();
+    }
+
+    // Service names: read for signed-in users, managed by admins only.
+    match /lr_service_names/{id} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    // Google Chat webhooks: admin only.
+    match /lr_google_chat_webhooks/{id} {
+      allow read, write: if isAdmin();
+    }
+
+    // AI / prompt settings: read for signed-in users, managed by admins only.
+    match /lr_ai_settings/{id} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    match /lr_review_prompt_settings/{id} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    match /lr_review_prompt_scripts/{id} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    // Deny everything else by default.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
