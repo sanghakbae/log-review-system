@@ -22,7 +22,7 @@ import {
   GoogleAuthProvider,
   getAuth,
   onAuthStateChanged,
-  signInWithPopup,
+  signInWithCredential,
   signOut as fbSignOut,
   type Auth,
   type User as FirebaseUser,
@@ -425,6 +425,95 @@ type ShimSession = {
   user: { id: string; email: string | null; user_metadata: { full_name: string; name: string } };
 } | null;
 
+// --- Google Identity Services (GIS) ----------------------------------------
+//
+// Google sign-in is done via GIS (a Google ID token obtained client-side) and
+// exchanged for a Firebase session with signInWithCredential. This avoids the
+// `<project>.firebaseapp.com/__/auth/handler` popup/redirect entirely, so it
+// works on the custom domain without cross-origin storage-partitioning issues.
+// Requires the app origin in the OAuth client's "Authorized JavaScript origins".
+
+const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID as string | undefined;
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+let gisScriptPromise: Promise<void> | null = null;
+const loadGis = (): Promise<void> => {
+  if (gisScriptPromise) return gisScriptPromise;
+  gisScriptPromise = new Promise<void>((resolve, reject) => {
+    if ((window as any).google?.accounts?.id) return resolve();
+    const script = document.createElement('script');
+    script.src = 'https://accounts.google.com/gsi/client';
+    script.async = true;
+    script.defer = true;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error('Failed to load Google Identity Services'));
+    document.head.appendChild(script);
+  });
+  return gisScriptPromise;
+};
+
+// Show a small modal with the official Google button; resolve with the ID token.
+const requestGoogleIdToken = async (): Promise<string> => {
+  await loadGis();
+  const google = (window as any).google;
+  return new Promise<string>((resolve, reject) => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText =
+      'position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:2147483647;display:flex;align-items:center;justify-content:center';
+    const box = document.createElement('div');
+    box.style.cssText =
+      'background:#fff;padding:28px 32px;border-radius:14px;display:flex;flex-direction:column;gap:18px;align-items:center;box-shadow:0 10px 40px rgba(0,0,0,.25)';
+    const title = document.createElement('div');
+    title.textContent = 'Google 계정으로 로그인';
+    title.style.cssText = 'font-size:15px;font-weight:600;color:#0f172a';
+    const buttonHost = document.createElement('div');
+    const cancel = document.createElement('button');
+    cancel.textContent = '취소';
+    cancel.style.cssText = 'font-size:13px;color:#64748b;background:none;border:0;cursor:pointer';
+    box.append(title, buttonHost, cancel);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    let settled = false;
+    const cleanup = () => {
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    };
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err);
+    };
+    cancel.onclick = () => fail(new Error('cancelled'));
+    overlay.onclick = (event) => {
+      if (event.target === overlay) fail(new Error('cancelled'));
+    };
+
+    google.accounts.id.initialize({
+      client_id: GOOGLE_CLIENT_ID,
+      auto_select: false,
+      cancel_on_tap_outside: true,
+      callback: (response: any) => {
+        if (settled) return;
+        if (response?.credential) {
+          settled = true;
+          cleanup();
+          resolve(response.credential as string);
+        } else {
+          fail(new Error('No credential returned'));
+        }
+      },
+    });
+    google.accounts.id.renderButton(buttonHost, {
+      theme: 'outline',
+      size: 'large',
+      text: 'signin_with',
+      width: 260,
+    });
+  });
+};
+/* eslint-enable @typescript-eslint/no-explicit-any */
+
 const toSession = (user: FirebaseUser | null): ShimSession => {
   if (!user) return null;
   const displayName = user.displayName ?? '';
@@ -464,12 +553,15 @@ const authShim = {
 
   async signInWithOAuth(_opts?: { provider?: string; options?: unknown }): Promise<Result<unknown>> {
     if (!authInstance) return { data: null, error: { message: 'Firebase is not configured' } };
+    if (!GOOGLE_CLIENT_ID) return { data: null, error: { message: 'VITE_GOOGLE_CLIENT_ID is not configured' } };
     try {
-      const provider = new GoogleAuthProvider();
-      provider.setCustomParameters({ prompt: 'select_account' });
-      await signInWithPopup(authInstance, provider);
+      const idToken = await requestGoogleIdToken();
+      const credential = GoogleAuthProvider.credential(idToken);
+      await signInWithCredential(authInstance, credential);
       return { data: null, error: null };
     } catch (error) {
+      // User dismissed the Google dialog — not an error worth surfacing.
+      if (error instanceof Error && error.message === 'cancelled') return { data: null, error: null };
       return { data: null, error: { message: error instanceof Error ? error.message : 'Sign-in failed' } };
     }
   },
