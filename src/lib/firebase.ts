@@ -25,7 +25,6 @@ import {
   getRedirectResult,
   onAuthStateChanged,
   setPersistence,
-  signInWithPopup,
   signInWithRedirect,
   signOut as fbSignOut,
   type Auth,
@@ -474,22 +473,16 @@ const authShim = {
 
   async signInWithOAuth(_opts?: { provider?: string; options?: unknown }): Promise<Result<unknown>> {
     if (!authInstance) return { data: null, error: { message: 'Firebase is not configured' } };
-    const provider = new GoogleAuthProvider();
-    provider.setCustomParameters({ prompt: 'select_account' });
     try {
-      // Popups are unreliable when the app domain differs from authDomain
-      // (third-party storage partitioning). Try popup, then fall back to a
-      // full-page redirect, which is robust on custom domains.
-      await signInWithPopup(authInstance, provider);
+      // Use a full-page redirect (not a popup): on a custom domain where the app
+      // origin differs from authDomain, popups silently hang without resolving
+      // due to third-party storage partitioning. Redirect is reliable.
+      const provider = new GoogleAuthProvider();
+      provider.setCustomParameters({ prompt: 'select_account' });
+      await signInWithRedirect(authInstance, provider);
       return { data: null, error: null };
-    } catch (popupError) {
-      try {
-        await signInWithRedirect(authInstance, provider);
-        return { data: null, error: null };
-      } catch (redirectError) {
-        const err = redirectError ?? popupError;
-        return { data: null, error: { message: err instanceof Error ? err.message : 'Sign-in failed' } };
-      }
+    } catch (error) {
+      return { data: null, error: { message: error instanceof Error ? error.message : 'Sign-in failed' } };
     }
   },
 
