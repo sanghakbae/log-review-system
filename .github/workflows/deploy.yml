@@ -36,12 +36,9 @@ jobs:
         run: npm ci
 
       - name: Build
-        env:
-          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
-          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
-          LLM_PROVIDER: ${{ secrets.LLM_PROVIDER }}
+        # Build config comes from committed .env.production (public Firebase web
+        # config + R2 Worker URL). No secrets needed — the OpenAI API key is read
+        # at runtime from Firestore, never inlined into the bundle.
         run: npm run build
 
       - name: Upload artifact

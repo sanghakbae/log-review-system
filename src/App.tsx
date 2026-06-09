@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
-import { isSupabaseConfigured, supabase } from './lib/supabase';
+import { isBackendReady, backend } from './lib/firebase';
 import { generateReviewGuide, isOpenAIConfigured } from './lib/openai';
 
 type ViewId = 'dashboard' | 'review-write' | 'review-result' | 'result-log' | 'permissions';
@@ -986,7 +986,7 @@ const migrateStoredAttachmentToParsedCsv = async (attachment: ReviewAttachmentRo
   }
 
   try {
-    const { data, error } = await supabase.storage.from(reviewUploadBucket).download(attachment.storage_path);
+    const { data, error } = await backend.storage.from(reviewUploadBucket).download(attachment.storage_path);
     if (error || !data) {
       console.error('Legacy attachment download failed:', error?.message ?? 'Missing file data');
       return attachment;
@@ -997,7 +997,7 @@ const migrateStoredAttachmentToParsedCsv = async (attachment: ReviewAttachmentRo
     });
     const csvFile = await convertUploadFileToParsedCsv(originalFile);
     const csvStoragePath = getConvertedStoragePath(attachment.storage_path, attachment.file_name);
-    const { error: uploadError } = await supabase.storage.from(reviewUploadBucket).upload(csvStoragePath, csvFile, {
+    const { error: uploadError } = await backend.storage.from(reviewUploadBucket).upload(csvStoragePath, csvFile, {
       contentType: csvFile.type || 'text/csv;charset=utf-8',
       upsert: true,
     });
@@ -1008,7 +1008,7 @@ const migrateStoredAttachmentToParsedCsv = async (attachment: ReviewAttachmentRo
     }
 
     if (attachment.id) {
-      const { error: updateError } = await supabase
+      const { error: updateError } = await backend
         .from('lr_review_attachments')
         .update({
           file_name: csvFile.name,
@@ -1024,7 +1024,7 @@ const migrateStoredAttachmentToParsedCsv = async (attachment: ReviewAttachmentRo
     }
 
     if (csvStoragePath !== attachment.storage_path) {
-      const { error: removeError } = await supabase.storage.from(reviewUploadBucket).remove([attachment.storage_path]);
+      const { error: removeError } = await backend.storage.from(reviewUploadBucket).remove([attachment.storage_path]);
       if (removeError) {
         console.warn('Legacy attachment source removal failed:', removeError.message);
       }
@@ -1190,11 +1190,11 @@ const sendGoogleChatWebhook = async (webhookUrl: string, payload: { text: string
     }
 
     if (relayResponse.ok && !relayPayload) {
-      console.warn('Google Chat webhook relay returned non-JSON response; falling back to Supabase Edge Function.');
+      console.warn('Google Chat webhook relay returned non-JSON response; retrying via the client relay.');
     }
 
-    if (isSupabaseConfigured) {
-      const { data, error } = await supabase.functions.invoke('google-chat-webhook', {
+    if (isBackendReady) {
+      const { data, error } = await backend.functions.invoke('google-chat-webhook', {
         body: {
           webhookUrl: trimmedWebhookUrl,
           payload,
@@ -1236,7 +1236,7 @@ const sendGoogleChatWebhook = async (webhookUrl: string, payload: { text: string
 };
 
 const loadGoogleChatWebhookUrls = async () => {
-  const { data, error } = await supabase
+  const { data, error } = await backend
     .from(googleChatWebhookTable)
     .select('url')
     .order('created_at', { ascending: true });
@@ -1262,7 +1262,7 @@ const parseGoogleChatWebhookUrls = (value: string) =>
   );
 
 const loadReviewPromptSettings = async () => {
-  const { data, error } = await supabase
+  const { data, error } = await backend
     .from(reviewPromptTable)
     .select('review_prompt_text, review_prompt_slots, review_prompt_selected_slot')
     .eq('id', 'default')
@@ -1280,7 +1280,7 @@ const loadReviewPromptSettings = async () => {
 };
 
 const loadReviewPromptScripts = async () => {
-  const { data, error } = await supabase
+  const { data, error } = await backend
     .from(reviewPromptScriptsTable)
     .select('slot_index, prompt_script, is_selected')
     .order('slot_index', { ascending: true });
@@ -1308,7 +1308,7 @@ const loadReviewPromptScripts = async () => {
 };
 
 const loadAISettings = async () => {
-  const { data, error } = await supabase
+  const { data, error } = await backend
     .from(aiSettingsTable)
     .select('openai_api_key, openai_model')
     .eq('id', 'default')
@@ -1481,7 +1481,7 @@ function App() {
   };
 
   const persistGoogleChatWebhookUrl = async (webhookUrl: string) => {
-    if (!isSupabaseConfigured || !sessionUser || currentUserRole !== 'admin') {
+    if (!isBackendReady || !sessionUser || currentUserRole !== 'admin') {
       showSaveNotice('error', '저장 실패');
       return;
     }
@@ -1492,7 +1492,7 @@ function App() {
       return;
     }
 
-    const { error } = await supabase
+    const { error } = await backend
       .from(googleChatWebhookTable)
       .upsert(
         normalizedUrls.map((url) => ({ url, updated_at: new Date().toISOString() })),
@@ -1524,13 +1524,13 @@ function App() {
   };
 
   const saveOpenAISettings = async () => {
-    if (!isSupabaseConfigured || !sessionUser || currentUserRole !== 'admin') {
+    if (!isBackendReady || !sessionUser || currentUserRole !== 'admin') {
       showSaveNotice('error', '저장 실패');
       return;
     }
 
     const openAIApiKeyToSave = openAIApiKeyInput.trim() || openAIApiKeySnapshotRef.current;
-    const { error } = await supabase
+    const { error } = await backend
       .from(aiSettingsTable)
       .upsert(
         {
@@ -1555,14 +1555,14 @@ function App() {
   };
 
   useEffect(() => {
-    if (!isSupabaseConfigured) {
+    if (!isBackendReady) {
       setLoadingAuth(false);
       return;
     }
 
     let mounted = true;
 
-    supabase.auth.getSession().then(({ data }) => {
+    backend.auth.getSession().then(({ data }) => {
       if (!mounted) return;
       const nextUser = getSessionUser(data.session);
       setSessionUser(nextUser);
@@ -1573,7 +1573,7 @@ function App() {
       setLoadingAuth(false);
     });
 
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: listener } = backend.auth.onAuthStateChange((_event, session) => {
       const nextUser = getSessionUser(session);
       setSessionUser(nextUser);
       if (nextUser) {
@@ -1589,7 +1589,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!isSupabaseConfigured || !sessionUser) {
+    if (!isBackendReady || !sessionUser) {
       clearSessionTimeoutTimer();
       return;
     }
@@ -1609,7 +1609,7 @@ function App() {
       }
 
       void (async () => {
-        await supabase.auth.signOut();
+        await backend.auth.signOut();
         window.localStorage.removeItem(sessionActivityStorageKey);
         resetAuthenticatedState();
         setAuthError('60분 동안 활동이 없어 로그아웃되었습니다.');
@@ -1661,14 +1661,14 @@ function App() {
     let cancelled = false;
 
     const syncProfile = async () => {
-      if (!isSupabaseConfigured || !sessionUser) {
+      if (!isBackendReady || !sessionUser) {
         setCurrentProfileRole('requester');
         setCurrentUserUnitName('');
         setCurrentProfileLoaded(false);
         return;
       }
 
-      const { data: existingProfile, error: selectError } = await supabase
+      const { data: existingProfile, error: selectError } = await backend
         .from('lr_profiles')
         .select('id, role, unit_name')
         .eq('id', sessionUser.id)
@@ -1691,7 +1691,7 @@ function App() {
         setCurrentProfileLoaded(true);
       }
 
-      const { error } = await supabase.from('lr_profiles').upsert(
+      const { error } = await backend.from('lr_profiles').upsert(
         {
           id: sessionUser.id,
           email: sessionUser.email,
@@ -1722,7 +1722,7 @@ function App() {
 
   useEffect(() => {
     const loadMembers = async () => {
-      if (!isSupabaseConfigured || !sessionUser) {
+      if (!isBackendReady || !sessionUser) {
         setMembers([]);
         setServiceNames([]);
         setCurrentUserUnitName('');
@@ -1751,7 +1751,7 @@ function App() {
       setMembersLoaded(false);
       setReviewPromptLoaded(false);
 
-      const { data, error } = await supabase
+      const { data, error } = await backend
         .from('lr_profiles')
         .select('id, email, full_name, unit_name, role');
 
@@ -1782,7 +1782,7 @@ function App() {
         role: isEndorphinAdminName(profile.full_name) ? 'admin' : (profile.role as UserRole) ?? 'requester',
       }));
 
-      const { data: currentProfileData, error: currentProfileError } = await supabase
+      const { data: currentProfileData, error: currentProfileError } = await backend
         .from('lr_profiles')
         .select('id, email, full_name, unit_name, role')
         .eq('id', sessionUser.id)
@@ -1857,7 +1857,7 @@ function App() {
 
       setCurrentUserUnitName(currentProfile?.unit_name ?? '');
 
-      const { data: serviceData, error: serviceError } = await supabase
+      const { data: serviceData, error: serviceError } = await backend
         .from('lr_service_names')
         .select('name')
         .order('created_at', { ascending: true });
@@ -1881,11 +1881,11 @@ function App() {
 
   useEffect(() => {
     const loadServiceNames = async () => {
-      if (!isSupabaseConfigured || !sessionUser) {
+      if (!isBackendReady || !sessionUser) {
         return;
       }
 
-      const { data, error } = await supabase
+      const { data, error } = await backend
         .from('lr_service_names')
         .select('name')
         .order('created_at', { ascending: true });
@@ -1907,7 +1907,7 @@ function App() {
   }, [activeView, sessionUser]);
 
   useEffect(() => {
-    if (!isSupabaseConfigured || !sessionUser || !reviewPromptLoaded || currentProfileRole !== 'admin') {
+    if (!isBackendReady || !sessionUser || !reviewPromptLoaded || currentProfileRole !== 'admin') {
       return;
     }
 
@@ -1921,7 +1921,7 @@ function App() {
 
     const timer = window.setTimeout(() => {
       void (async () => {
-        const { error } = await supabase
+        const { error } = await backend
           .from(reviewPromptTable)
           .upsert(
             {
@@ -1948,7 +1948,7 @@ function App() {
           updated_at: new Date().toISOString(),
         }));
 
-        const { error: scriptError } = await supabase
+        const { error: scriptError } = await backend
           .from(reviewPromptScriptsTable)
           .upsert(promptScriptRows, { onConflict: 'slot_index' });
 
@@ -1976,14 +1976,14 @@ function App() {
 
   useEffect(() => {
     const loadRequests = async () => {
-      if (!isSupabaseConfigured) {
+      if (!isBackendReady) {
         setRequests([]);
         setRequestsLoaded(false);
         return;
       }
 
       if (!sessionUser) {
-        const { data, error } = await supabase
+        const { data, error } = await backend
           .from('lr_public_review_requests')
           .select('id, title, requester_name, status, request_created_at, created_at, service_name, log_file_count')
           .order('created_at', { ascending: false });
@@ -2007,7 +2007,7 @@ function App() {
         return;
       }
 
-      const { data, error } = await supabase
+      const { data, error } = await backend
         .from('lr_review_requests')
         .select('id, title, requester_id, requester_name, status, request_created_at, created_at, request_body')
         .order('created_at', { ascending: false });
@@ -2021,7 +2021,7 @@ function App() {
 
       const requestIds = (data ?? []).map((item) => item.id);
       const { data: attachmentData, error: attachmentError } = requestIds.length
-        ? await supabase
+        ? await backend
             .from('lr_review_attachments')
             .select('id, request_id, file_name, mime_type, storage_path')
             .in('request_id', requestIds)
@@ -2082,13 +2082,13 @@ function App() {
       return;
     }
 
-    if (!isSupabaseConfigured) {
+    if (!isBackendReady) {
       return;
     }
 
     const timer = window.setTimeout(() => {
       void (async () => {
-        const { error } = await supabase
+        const { error } = await backend
           .from('lr_profiles')
           .upsert(
             {
@@ -2117,12 +2117,12 @@ function App() {
   }, [currentUserUnitName, membersLoaded, sessionUser]);
 
   const loadReviewResults = async () => {
-    if (!isSupabaseConfigured || !sessionUser) {
+    if (!isBackendReady || !sessionUser) {
       setReviewResults([]);
       return;
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await backend
       .from('lr_review_results')
       .select('id, request_id, reviewer_id, summary, created_at')
       .order('created_at', { ascending: false });
@@ -2146,7 +2146,7 @@ function App() {
       new Set(latestResultRows.map((row) => row.request_id).filter((value): value is string => Boolean(value))),
     );
     const { data: requestRows, error: requestLoadError } = requestIds.length
-      ? await supabase
+      ? await backend
           .from('lr_review_requests')
           .select('id, requester_name, service_name, request_created_at, created_at')
           .in('id', requestIds)
@@ -2238,7 +2238,7 @@ function App() {
         }
 
         try {
-          const { data, error } = await supabase.storage.from(reviewUploadBucket).download(attachment.storagePath);
+          const { data, error } = await backend.storage.from(reviewUploadBucket).download(attachment.storagePath);
           if (error || !data) {
             return attachment;
           }
@@ -2291,7 +2291,7 @@ function App() {
       logFiles: fileSummaries,
     });
 
-    if (isSupabaseConfigured && sessionUser) {
+    if (isBackendReady && sessionUser) {
       const requestId = crypto.randomUUID();
       const requestRow = {
         id: requestId,
@@ -2303,7 +2303,7 @@ function App() {
         request_created_at: new Date().toISOString(),
       };
 
-      const { error: requestError } = await supabase.from('lr_review_requests').insert(requestRow);
+      const { error: requestError } = await backend.from('lr_review_requests').insert(requestRow);
       if (requestError) {
         console.error('Review request save failed:', requestError.message);
         return { ok: false, errorMessage: `검토 요청 저장 실패: ${requestError.message}` };
@@ -2430,8 +2430,8 @@ function App() {
     setReviewGuideError(null);
     setSelectedRequestId(requestId);
 
-    if (isSupabaseConfigured && sessionUser) {
-      const { error } = await supabase
+    if (isBackendReady && sessionUser) {
+      const { error } = await backend
         .from('lr_review_requests')
         .update({ status: 'in_review' })
         .eq('id', requestId);
@@ -2461,9 +2461,9 @@ function App() {
       : `${Date.now()}`;
     setReviewGuideText('');
 
-    if (isSupabaseConfigured && sessionUser) {
+    if (isBackendReady && sessionUser) {
       void (async () => {
-        const { data: existingResult, error: existingResultError } = await supabase
+        const { data: existingResult, error: existingResultError } = await backend
           .from('lr_review_results')
           .select('id')
           .eq('request_id', selectedRequest.id)
@@ -2485,11 +2485,11 @@ function App() {
           recommendation: null,
         };
         const { error: resultError } = existingResult
-          ? await supabase
+          ? await backend
               .from('lr_review_results')
               .update(resultPayload)
               .eq('id', savedResultId)
-          : await supabase.from('lr_review_results').insert({
+          : await backend.from('lr_review_results').insert({
               id: savedResultId,
               request_id: selectedRequest.id,
               ...resultPayload,
@@ -2501,7 +2501,7 @@ function App() {
           return;
         }
 
-        const { error: logError } = await supabase.from('lr_review_logs').insert({
+        const { error: logError } = await backend.from('lr_review_logs').insert({
           request_id: selectedRequest.id,
           actor_id: sessionUser.id,
           action: existingResult ? 'review_updated' : 'review_completed',
@@ -2521,7 +2521,7 @@ function App() {
           return;
         }
 
-        const { error: requestError } = await supabase
+        const { error: requestError } = await backend
           .from('lr_review_requests')
           .update({
             status: 'done',
@@ -2565,13 +2565,13 @@ function App() {
   };
 
   const login = async () => {
-    if (!isSupabaseConfigured) {
-      setAuthError('Supabase 환경 변수가 없어 Google 로그인을 시작할 수 없습니다.');
+    if (!isBackendReady) {
+      setAuthError('Firebase 환경 변수가 없어 Google 로그인을 시작할 수 없습니다.');
       return;
     }
 
     setAuthError(null);
-    const { error } = await supabase.auth.signInWithOAuth({
+    const { error } = await backend.auth.signInWithOAuth({
       provider: 'google',
       options: {
         redirectTo: getOAuthRedirectUrl(),
@@ -2588,11 +2588,11 @@ function App() {
   };
 
   const logout = async () => {
-    if (!isSupabaseConfigured) {
+    if (!isBackendReady) {
       return;
     }
 
-    await supabase.auth.signOut();
+    await backend.auth.signOut();
     window.localStorage.removeItem(sessionActivityStorageKey);
     resetAuthenticatedState();
     setAuthError(null);
@@ -2624,9 +2624,9 @@ function App() {
       if (current.includes(trimmed)) return current;
       const next = [...current, trimmed];
 
-      if (isSupabaseConfigured && sessionUser) {
+      if (isBackendReady && sessionUser) {
         void (async () => {
-          const { error } = await supabase.from('lr_service_names').upsert(
+          const { error } = await backend.from('lr_service_names').upsert(
             { name: trimmed },
             { onConflict: 'name' },
           );
@@ -2647,9 +2647,9 @@ function App() {
     setServiceNames((current) => {
       const next = current.filter((item) => item !== name);
 
-      if (isSupabaseConfigured && sessionUser) {
+      if (isBackendReady && sessionUser) {
         void (async () => {
-          const { error } = await supabase.from('lr_service_names').delete().eq('name', name);
+          const { error } = await backend.from('lr_service_names').delete().eq('name', name);
           if (error) {
             console.error('Failed to delete service name:', error.message);
             showSaveNotice('error', '저장 실패');
@@ -2673,12 +2673,12 @@ function App() {
       setCurrentProfileRole(role);
     }
 
-    if (!isSupabaseConfigured || !sessionUser) {
+    if (!isBackendReady || !sessionUser) {
       return;
     }
 
     void (async () => {
-      const { error } = await supabase
+      const { error } = await backend
         .from('lr_profiles')
         .update({
           role,
@@ -2704,7 +2704,7 @@ function App() {
   const updateMemberUnitName = (memberId: string, unitName: string) => {
     const trimmed = unitName.trim();
 
-    if (!isSupabaseConfigured || !sessionUser) {
+    if (!isBackendReady || !sessionUser) {
       setMembers((current) =>
         current.map((member) => (member.id === memberId ? { ...member, unitName: trimmed } : member)),
       );
@@ -2715,7 +2715,7 @@ function App() {
     }
 
     void (async () => {
-      const { error } = await supabase
+      const { error } = await backend
         .from('lr_profiles')
         .update({
           unit_name: trimmed,
@@ -2757,7 +2757,7 @@ function App() {
       setSelectedRequestId(remainingRequests[0]?.id ?? null);
     }
 
-    if (!isSupabaseConfigured || !sessionUser) {
+    if (!isBackendReady || !sessionUser) {
       showSaveNotice('success', '저장 성공');
       return;
     }
@@ -2769,7 +2769,7 @@ function App() {
           request.file_summaries?.map((file) => file.storagePath).filter((path): path is string => Boolean(path)) ?? [],
       );
 
-    const { data: deletedRequests, error } = await supabase
+    const { data: deletedRequests, error } = await backend
       .from('lr_review_requests')
       .delete()
       .in('id', requestIds)
@@ -2795,7 +2795,7 @@ function App() {
     }
 
     if (storagePaths.length > 0) {
-      const { error: storageError } = await supabase.storage.from(reviewUploadBucket).remove(storagePaths);
+      const { error: storageError } = await backend.storage.from(reviewUploadBucket).remove(storagePaths);
       if (storageError) {
         console.error('Failed to delete review attachments from storage:', storageError.message);
       }
@@ -2809,7 +2809,7 @@ function App() {
     let offset = 0;
 
     while (true) {
-      const { data, error } = await supabase.storage.from(reviewUploadBucket).list(prefix, {
+      const { data, error } = await backend.storage.from(reviewUploadBucket).list(prefix, {
         limit: 1000,
         offset,
         sortBy: { column: 'name', order: 'asc' },
@@ -2848,8 +2848,8 @@ function App() {
       return;
     }
 
-    if (!isSupabaseConfigured || !sessionUser) {
-      showSaveNotice('error', 'Supabase 연결이 필요합니다.');
+    if (!isBackendReady || !sessionUser) {
+      showSaveNotice('error', 'Firebase 연결이 필요합니다.');
       return;
     }
 
@@ -2870,7 +2870,7 @@ function App() {
 
       for (let index = 0; index < storagePaths.length; index += 100) {
         const batch = storagePaths.slice(index, index + 100);
-        const { error } = await supabase.storage.from(reviewUploadBucket).remove(batch);
+        const { error } = await backend.storage.from(reviewUploadBucket).remove(batch);
         if (error) {
           throw error;
         }
@@ -2893,12 +2893,12 @@ function App() {
     setReviewResults((current) => current.filter((result) => !resultIds.includes(result.id)));
     setSelectedResultIds([]);
 
-    if (!isSupabaseConfigured || !sessionUser) {
+    if (!isBackendReady || !sessionUser) {
       showSaveNotice('success', '저장 성공');
       return;
     }
 
-    const { data: deletedResults, error } = await supabase
+    const { data: deletedResults, error } = await backend
       .from('lr_review_results')
       .delete()
       .in('id', resultIds)
@@ -2940,12 +2940,12 @@ function App() {
     );
     setRequests(nextRequests);
 
-    if (!isSupabaseConfigured || !sessionUser) {
+    if (!isBackendReady || !sessionUser) {
       showSaveNotice('success', '저장 성공');
       return;
     }
 
-    const { error } = await supabase
+    const { error } = await backend
       .from('lr_review_requests')
       .update({
         request_created_at: nextRequestCreatedAt,
@@ -2986,12 +2986,12 @@ function App() {
       ),
     );
 
-    if (!isSupabaseConfigured || !sessionUser) {
+    if (!isBackendReady || !sessionUser) {
       showSaveNotice('success', '저장 성공');
       return;
     }
 
-    const { error } = await supabase
+    const { error } = await backend
       .from('lr_review_requests')
       .update({
         requester_id: member.id,
@@ -3045,7 +3045,7 @@ function App() {
           <button
             className="mobile-auth-btn primary-btn text-12"
             onClick={sessionUser ? logout : login}
-            disabled={!sessionUser && !isSupabaseConfigured}
+            disabled={!sessionUser && !isBackendReady}
             type="button"
           >
             {sessionUser ? '로그아웃' : '로그인'}
@@ -3110,12 +3110,12 @@ function App() {
           <div className="topbar-actions">
             <div className="auth-inline">
               <div className="auth-user">
-                {loadingAuth ? '확인 중...' : sessionUser?.name ?? (isSupabaseConfigured ? '미로그인' : '설정 필요')}
+                {loadingAuth ? '확인 중...' : sessionUser?.name ?? (isBackendReady ? '미로그인' : '설정 필요')}
               </div>
               <button
                 className="primary-btn text-12"
                 onClick={sessionUser ? logout : login}
-                disabled={!sessionUser && !isSupabaseConfigured}
+                disabled={!sessionUser && !isBackendReady}
                 type="button"
               >
                 <span className="text-12">{sessionUser ? '로그아웃' : 'Google로 로그인'}</span>
@@ -3209,13 +3209,13 @@ function App() {
                 onSendGoogleChatWebhookTest={() => void sendGoogleChatWebhookTest()}
                 onSaveOpenAISettings={() => void saveOpenAISettings()}
                 onRemoveGoogleChatWebhookUrl={(url) => {
-                  if (currentUserRole !== 'admin' || !isSupabaseConfigured || !sessionUser) {
+                  if (currentUserRole !== 'admin' || !isBackendReady || !sessionUser) {
                     showSaveNotice('error', '저장 실패');
                     return;
                   }
 
                   void (async () => {
-      const { error } = await supabase.from(googleChatWebhookTable).delete().eq('url', url);
+      const { error } = await backend.from(googleChatWebhookTable).delete().eq('url', url);
       if (error) {
         console.error('Failed to delete Google Chat webhook URL:', error.message);
         showSaveNotice('error', '저장 실패');
@@ -3272,9 +3272,9 @@ function App() {
                 <strong className="text-14">로그인 전에는 요청 정보와 검토 데이터를 볼 수 없습니다.</strong>
               </div>
               <p className="text-14">
-                {isSupabaseConfigured
+                {isBackendReady
                   ? '우측 상단의 Google 로그인 버튼을 눌러 접속을 시작하세요.'
-                  : '먼저 Supabase URL과 Anon Key를 설정한 뒤 Google OAuth를 활성화해야 합니다.'}
+                  : '먼저 Firebase 설정(VITE_FIREBASE_*)을 입력한 뒤 Google 로그인을 활성화해야 합니다.'}
               </p>
               {authError && <p className="text-12">{authError}</p>}
             </article>
@@ -3952,7 +3952,7 @@ function ReviewResultView({
         throw new Error('미리보기 데이터가 없습니다.');
       }
 
-      const { data, error } = await supabase.storage.from(reviewUploadBucket).download(attachment.storagePath);
+      const { data, error } = await backend.storage.from(reviewUploadBucket).download(attachment.storagePath);
       if (error || !data) {
         throw new Error(error?.message ?? '파일을 불러오지 못했습니다.');
       }
@@ -5119,7 +5119,7 @@ function PermissionsView({
                 <div className="prompt-card-note text-12">
                   {currentUserRole === 'requester'
                     ? '요청자는 웹훅을 수정할 수 없습니다.'
-                    : '저장된 값은 Supabase에 보관되고, 검토 요청이 등록될 때 모두 사용됩니다.'}
+                    : '저장된 값은 Firebase에 보관되고, 검토 요청이 등록될 때 모두 사용됩니다.'}
                 </div>
               </div>
             )}

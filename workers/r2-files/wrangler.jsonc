@@ -1,0 +1,20 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "lrs-r2-files",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-15",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // R2 bucket holding the uploaded log files (was the Supabase `review-uploads`
+  // bucket). Used for server-side list/delete via the binding.
+  "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "log-review-uploads" }],
+
+  "vars": {
+    "FIREBASE_PROJECT_ID": "log-review-system",
+    // Comma-separated list of browser origins allowed to call this Worker.
+    "ALLOWED_ORIGINS": "https://lrs.sanghak.kr,http://localhost:5173"
+  }
+
+  // File bytes are proxied through the Worker via the R2 binding above, so no
+  // R2 API token / S3 credentials are needed.
+}

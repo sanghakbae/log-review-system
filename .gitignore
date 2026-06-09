@@ -5,3 +5,9 @@ dist/
 *.log
 *.tmp
 tsconfig.tsbuildinfo
+
+# Firebase service-account key (used only by the migration script) — never commit
+service-account.json
+*-service-account*.json
+.firebase/
+.env.migrate
