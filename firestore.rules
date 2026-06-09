@@ -6,8 +6,10 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    // Only the owner account may access authenticated data. Public review
+    // requests remain world-readable (see lr_public_review_requests below).
     function signedIn() {
-      return request.auth != null;
+      return request.auth != null && request.auth.token.email == 'totoriverce@gmail.com';
     }
 
     function myProfile() {

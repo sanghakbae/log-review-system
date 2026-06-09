@@ -249,6 +249,15 @@ const getSessionUser = (
   };
 };
 
+// Only these emails may sign in (comma-separated VITE_ALLOWED_EMAIL, default
+// restricts to the single owner account). Empty list = no restriction.
+const allowedLoginEmails = ((import.meta.env.VITE_ALLOWED_EMAIL as string | undefined) ?? 'totoriverce@gmail.com')
+  .split(',')
+  .map((value) => value.trim().toLowerCase())
+  .filter(Boolean);
+const isAllowedLoginEmail = (email?: string | null): boolean =>
+  allowedLoginEmails.length === 0 || (!!email && allowedLoginEmails.includes(email.toLowerCase()));
+
 const getAvatarInitials = (name: string) => {
   const compact = name.replace(/\s+/g, '');
   if (!compact) return '미지';
@@ -1562,19 +1571,32 @@ function App() {
 
     let mounted = true;
 
+    const rejectDisallowed = (nextUser: SessionUser | null): boolean => {
+      if (nextUser && !isAllowedLoginEmail(nextUser.email)) {
+        void backend.auth.signOut();
+        setSessionUser(null);
+        resetAuthenticatedState();
+        setAuthError('이 계정은 접근 권한이 없습니다. 허용된 계정으로 로그인하세요.');
+        return true;
+      }
+      return false;
+    };
+
     backend.auth.getSession().then(({ data }) => {
       if (!mounted) return;
       const nextUser = getSessionUser(data.session);
+      setLoadingAuth(false);
+      if (rejectDisallowed(nextUser)) return;
       setSessionUser(nextUser);
       if (nextUser) {
         setCurrentProfileRole(getCachedProfileRole(nextUser.id));
         setCurrentProfileLoaded(false);
       }
-      setLoadingAuth(false);
     });
 
     const { data: listener } = backend.auth.onAuthStateChange((_event, session) => {
       const nextUser = getSessionUser(session);
+      if (rejectDisallowed(nextUser)) return;
       setSessionUser(nextUser);
       if (nextUser) {
         setCurrentProfileRole(getCachedProfileRole(nextUser.id));
