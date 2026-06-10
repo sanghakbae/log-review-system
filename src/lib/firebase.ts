@@ -559,14 +559,20 @@ const authShim = {
       const idToken = await requestGoogleIdToken();
       stage = 'firebase-credential';
       const credential = GoogleAuthProvider.credential(idToken);
-      // Clear any stale/partial session first; otherwise signInWithCredential
-      // with the same Google provider throws auth/provider-already-linked.
-      if (authInstance.currentUser) {
-        try {
-          await fbSignOut(authInstance);
-        } catch {
-          /* ignore */
-        }
+      // Wait for the persisted session to finish restoring (currentUser is null
+      // synchronously right after init), then clear it. Otherwise
+      // signInWithCredential with the same Google provider throws
+      // auth/provider-already-linked against the restored user.
+      try {
+        const auth = authInstance as Auth & { authStateReady?: () => Promise<void> };
+        if (typeof auth.authStateReady === 'function') await auth.authStateReady();
+      } catch {
+        /* ignore */
+      }
+      try {
+        await fbSignOut(authInstance);
+      } catch {
+        /* ignore */
       }
       await signInWithCredential(authInstance, credential);
       return { data: null, error: null };
