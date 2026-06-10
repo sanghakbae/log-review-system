@@ -554,15 +554,26 @@ const authShim = {
   async signInWithOAuth(_opts?: { provider?: string; options?: unknown }): Promise<Result<unknown>> {
     if (!authInstance) return { data: null, error: { message: 'Firebase is not configured' } };
     if (!GOOGLE_CLIENT_ID) return { data: null, error: { message: 'VITE_GOOGLE_CLIENT_ID is not configured' } };
+    let stage = 'gis-token';
     try {
       const idToken = await requestGoogleIdToken();
+      stage = 'firebase-credential';
       const credential = GoogleAuthProvider.credential(idToken);
       await signInWithCredential(authInstance, credential);
       return { data: null, error: null };
     } catch (error) {
       // User dismissed the Google dialog — not an error worth surfacing.
       if (error instanceof Error && error.message === 'cancelled') return { data: null, error: null };
-      return { data: null, error: { message: error instanceof Error ? error.message : 'Sign-in failed' } };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const code = (error as any)?.code ?? '';
+      const message = error instanceof Error ? error.message : 'Sign-in failed';
+      // Make the failure visible without DevTools (temporary diagnostics).
+      try {
+        window.alert(`로그인 실패 [${stage}]\ncode: ${code}\nmsg: ${message}`);
+      } catch {
+        /* noop */
+      }
+      return { data: null, error: { message } };
     }
   },
 
