@@ -574,7 +574,20 @@ const authShim = {
       } catch {
         /* ignore */
       }
-      await signInWithCredential(authInstance, credential);
+      try {
+        await signInWithCredential(authInstance, credential);
+      } catch (signInError) {
+        // If a lingering session still causes a link conflict, sign out and
+        // retry once with the same (still-valid) Google ID token.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const c = (signInError as any)?.code;
+        if (c === 'auth/provider-already-linked' || c === 'auth/credential-already-in-use') {
+          await fbSignOut(authInstance).catch(() => undefined);
+          await signInWithCredential(authInstance, GoogleAuthProvider.credential(idToken));
+        } else {
+          throw signInError;
+        }
+      }
       return { data: null, error: null };
     } catch (error) {
       // User dismissed the Google dialog — not an error worth surfacing.
