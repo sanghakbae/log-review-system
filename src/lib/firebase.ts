@@ -554,10 +554,8 @@ const authShim = {
   async signInWithOAuth(_opts?: { provider?: string; options?: unknown }): Promise<Result<unknown>> {
     if (!authInstance) return { data: null, error: { message: 'Firebase is not configured' } };
     if (!GOOGLE_CLIENT_ID) return { data: null, error: { message: 'VITE_GOOGLE_CLIENT_ID is not configured' } };
-    let stage = 'gis-token';
     try {
       const idToken = await requestGoogleIdToken();
-      stage = 'firebase-credential';
       const credential = GoogleAuthProvider.credential(idToken);
       // Wait for the persisted session to finish restoring (currentUser is null
       // synchronously right after init), then clear it. Otherwise
@@ -592,15 +590,8 @@ const authShim = {
     } catch (error) {
       // User dismissed the Google dialog — not an error worth surfacing.
       if (error instanceof Error && error.message === 'cancelled') return { data: null, error: null };
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const code = (error as any)?.code ?? '';
       const message = error instanceof Error ? error.message : 'Sign-in failed';
-      // Make the failure visible without DevTools (temporary diagnostics).
-      try {
-        window.alert(`로그인 실패 [${stage}]\ncode: ${code}\nmsg: ${message}`);
-      } catch {
-        /* noop */
-      }
+      console.error('Google sign-in failed:', error);
       return { data: null, error: { message } };
     }
   },

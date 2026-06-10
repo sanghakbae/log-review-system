@@ -21,13 +21,20 @@ R2 API 토큰·presigned URL·버킷 CORS가 전혀 필요 없다.
 프로젝트: `log-review-system` (생성됨)
 
 1. **Authentication → Sign-in method → Google** 활성화.
-2. **Authentication → Settings → Authorized domains** 에 추가:
-   - `lrs.sanghak.kr` (운영 도메인 — 필수)
-   - `localhost` (로컬, 보통 기본 포함)
-   - `log-review-system.firebaseapp.com` (기본 포함)
-   > 목록에 없는 도메인에서 띄우면 Google 팝업 로그인이 차단된다.
-3. **Firestore Database** 생성 (region `asia-northeast3` 서울 권장, 프로덕션 모드).
-   - Firebase Storage는 **사용하지 않는다** (파일은 R2).
+2. **Authentication → Settings → Authorized domains** 에 `lrs.sanghak.kr` 추가.
+3. **OAuth 클라이언트의 "승인된 JavaScript 원본"** 에 `https://lrs.sanghak.kr` 추가
+   (Google Cloud Console → APIs & Services → Credentials → 자동 생성된 Web client).
+   같은 Firebase 프로젝트의 Cloud Console 뷰일 뿐 별도 서비스 아님. GIS 로그인에 필수.
+4. **Firestore Database** 생성 (region `asia-northeast3`, 프로덕션 모드). Firebase Storage는 미사용(파일=R2).
+
+> ⚠️ 로그인 방식: signInWithPopup/Redirect는 커스텀 도메인(앱=lrs.sanghak.kr, authDomain=
+> firebaseapp.com)에서 브라우저 스토리지 분리 때문에 실패한다. 대신 **GIS(Google Identity
+> Services)로 ID 토큰을 받아 `signInWithCredential`** 로 로그인한다(`src/lib/firebase.ts`,
+> `VITE_GOOGLE_CLIENT_ID` 필요).
+>
+> ⚠️ 마이그레이션으로 import된 auth 사용자는 google provider 링크가 잘못 들어가
+> `auth/provider-already-linked`를 유발한다. `node scripts/fix-auth-providers.mjs <email>`
+> 로 한 번 정리하면 uid 보존한 채 해결된다.
 
 ## 2. Cloudflare R2 + Worker (`workers/r2-files/`) — 이미 배포됨
 
