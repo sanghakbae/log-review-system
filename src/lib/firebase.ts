@@ -559,6 +559,15 @@ const authShim = {
       const idToken = await requestGoogleIdToken();
       stage = 'firebase-credential';
       const credential = GoogleAuthProvider.credential(idToken);
+      // Clear any stale/partial session first; otherwise signInWithCredential
+      // with the same Google provider throws auth/provider-already-linked.
+      if (authInstance.currentUser) {
+        try {
+          await fbSignOut(authInstance);
+        } catch {
+          /* ignore */
+        }
+      }
       await signInWithCredential(authInstance, credential);
       return { data: null, error: null };
     } catch (error) {
