@@ -122,15 +122,16 @@ async function migrateAuthUsers() {
   }
   log(`Found ${users.length} Supabase auth users`);
 
+  // NOTE: do NOT fabricate a google.com providerData entry. The provider uid
+  // must be the real Google federated `sub` (unknown here). A wrong value (e.g.
+  // the email) makes a real Google sign-in fail with auth/provider-already-linked.
+  // Import with a verified email only; Google links itself on first sign-in.
   const toImport = users.map((u) => ({
     uid: u.id, // preserve the uid so all FK references stay valid
     email: u.email,
     emailVerified: true,
     displayName: u.user_metadata?.full_name || u.user_metadata?.name || undefined,
     photoURL: u.user_metadata?.avatar_url || undefined,
-    providerData: u.email
-      ? [{ uid: u.email, email: u.email, providerId: 'google.com' }]
-      : [],
   }));
 
   if (DRY_RUN) {
